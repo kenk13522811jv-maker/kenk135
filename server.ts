@@ -296,9 +296,10 @@ app.post('/api/cleanup', async (_req, res) => {
 // Start server with Vite middleware in dev or static files in production
 async function bootstrap() {
   if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    const distPath = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(distPath, 'index.html'));
     });
   } else {
     const vite = await createViteServer({
