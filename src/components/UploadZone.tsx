@@ -18,8 +18,8 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { RetentionOption, UploadedFileItem, Language } from '../types';
-import { uploadAsset, uploadAssetFromUrl } from '../services/assetService';
-import { getActiveFirebaseConfig } from '../services/firebase';
+import { uploadAsset, uploadAssetFromUrl, cancelCurrentUpload } from '../services/assetService';
+import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
 import { translations } from '../services/translations';
 
 interface UploadZoneProps {
@@ -102,7 +102,12 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
   };
 
-  const handleClearSelection = () => {
+  const handleClearSelection = async () => {
+    if (isUploading) {
+      try {
+        await cancelCurrentUpload();
+      } catch {}
+    }
     if (previewUrl && selectedFile) {
       URL.revokeObjectURL(previewUrl);
     }
@@ -214,18 +219,47 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         {/* Current storage target indicator */}
         <button
           onClick={onOpenFirebaseSettings}
-          className="flex items-center gap-2 self-start sm:self-auto bg-slate-950/80 border border-amber-500/30 hover:border-amber-500/60 rounded-xl px-3.5 py-2 text-xs text-slate-300 transition-all hover:bg-slate-900 group"
+          className={`flex items-center gap-2 self-start sm:self-auto rounded-xl px-3.5 py-2 text-xs transition-all border ${
+            isFirebaseConfigured()
+              ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+              : 'bg-amber-950/60 border-amber-500/50 text-amber-300 animate-pulse'
+          }`}
           title="Click to view or edit Firebase configuration"
         >
           <Flame className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
           <div className="text-left">
-            <div className="text-[10px] text-slate-400 leading-none">Storage Bucket</div>
-            <div className="font-mono font-semibold text-amber-300 truncate max-w-[150px] sm:max-w-[190px]">
-              {fbConfig.storageBucket || 'firebase-storage'}
+            <div className="text-[10px] opacity-80 leading-none">Storage Target</div>
+            <div className="font-mono font-semibold truncate max-w-[150px] sm:max-w-[190px]">
+              {isFirebaseConfigured() ? (fbConfig.storageBucket || 'Firebase Storage') : '⚠️ Firebase Not Set'}
             </div>
           </div>
         </button>
       </div>
+
+      {/* Warning banner when Firebase credentials are not yet set */}
+      {!isFirebaseConfigured() && (
+        <div className="mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs sm:text-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Flame className="w-5 h-5 shrink-0 text-amber-400" />
+            <div>
+              <div className="font-bold text-amber-200">
+                {lang === 'bn' ? 'Firebase ক্রেডেনশিয়াল দেওয়া হয়নি' : 'Firebase Not Configured'}
+              </div>
+              <div className="text-[11px] text-slate-300 mt-0.5">
+                {lang === 'bn' 
+                  ? 'Render-এ ফাইল আপলোড করতে Render Dashboard > Environment Variables-এ কি-গুলো বসিয়ে দিন, অথবা এখনই Firebase কনফিগ-এ ক্লিক করে ইনপুট দিন।'
+                  : 'Add Firebase environment variables in Render Dashboard or click Configure to save directly into Firebase.'}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={onOpenFirebaseSettings}
+            className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold shrink-0 text-xs shadow-md shadow-amber-500/20"
+          >
+            {lang === 'bn' ? 'Firebase কনফিগ করুন' : 'Configure Firebase'}
+          </button>
+        </div>
+      )}
 
       {/* Input Method Switcher (File vs URL) */}
       <div className="flex items-center gap-2 mt-5">

@@ -2,7 +2,7 @@ import React from 'react';
 import { Flame, Settings, Code, Globe2, ShieldCheck, Database } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../services/translations';
-import { getActiveFirebaseConfig } from '../services/firebase';
+import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
 
 interface NavbarProps {
   lang: Language;
@@ -51,12 +51,16 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Storage status badge */}
           <button
             onClick={onOpenFirebaseSettings}
-            title={`Firebase Storage Bucket: ${fbConfig.storageBucket}`}
-            className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-950/50 text-amber-300 border border-amber-500/30 hover:bg-amber-900/40 transition-colors"
+            title={isFirebaseConfigured() ? `Firebase Connected (${fbConfig.storageBucket || fbConfig.projectId})` : 'Firebase Not Configured'}
+            className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+              isFirebaseConfigured()
+                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/40'
+                : 'bg-amber-950/60 text-amber-300 border-amber-500/40 hover:bg-amber-900/40'
+            }`}
           >
-            <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-            <span className="truncate max-w-[120px] sm:max-w-[180px] font-mono">
-              {fbConfig.storageBucket ? 'Firebase Connected' : 'Local Sandbox'}
+            <ShieldCheck className={`w-3.5 h-3.5 ${isFirebaseConfigured() ? 'text-emerald-400' : 'text-amber-400'}`} />
+            <span className="truncate max-w-[140px] sm:max-w-[200px] font-mono">
+              {isFirebaseConfigured() ? 'Firebase Live' : 'Firebase Not Set'}
             </span>
           </button>
 

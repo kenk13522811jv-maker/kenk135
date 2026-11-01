@@ -242,7 +242,10 @@ export default function App() {
                 <Dashboard
                   files={files.slice(0, 3)}
                   lang={lang}
-                  onRefresh={() => runAutomatedCleanup()}
+                  onRefresh={(deletedId) => {
+                    if (deletedId) setFiles(prev => prev.filter(f => f.id !== deletedId));
+                    runAutomatedCleanup();
+                  }}
                   onPreview={(f) => setPreviewFile(f)}
                 />
               </div>
@@ -253,7 +256,10 @@ export default function App() {
             <Dashboard
               files={files}
               lang={lang}
-              onRefresh={() => runAutomatedCleanup()}
+              onRefresh={(deletedId) => {
+                if (deletedId) setFiles(prev => prev.filter(f => f.id !== deletedId));
+                runAutomatedCleanup();
+              }}
               onPreview={(f) => setPreviewFile(f)}
             />
           </div>

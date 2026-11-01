@@ -26,7 +26,7 @@ import { getFileBlobForDownload } from '../services/r2Service';
 interface DashboardProps {
   files: UploadedFileItem[];
   lang: Language;
-  onRefresh: () => void;
+  onRefresh: (deletedId?: string) => void;
   onPreview: (file: UploadedFileItem) => void;
 }
 
@@ -147,15 +147,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const confirmDelete = async () => {
     if (!fileToDelete) return;
-    setDeletingId(fileToDelete.id);
+    const target = fileToDelete;
+    setDeletingId(target.id);
     try {
-      await deleteAsset(fileToDelete);
-      onRefresh();
+      await deleteAsset(target);
     } catch (err) {
-      console.error(err);
+      console.error('Delete error:', err);
     } finally {
       setDeletingId(null);
       setFileToDelete(null);
+      onRefresh(target.id);
     }
   };
 

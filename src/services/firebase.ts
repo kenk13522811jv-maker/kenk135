@@ -28,7 +28,6 @@ try {
 
 export function getActiveFirebaseConfig(): FirebaseConfigType {
   // 1. PRIMARY: Vite Environment Variables (Render, Vercel, .env)
-  // This is the clean, secure method where no secrets are stored in the repo!
   const envApiKey = import.meta.env.VITE_FIREBASE_API_KEY;
   const envProjectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
 
@@ -62,7 +61,7 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
     return localDevConfig as FirebaseConfigType;
   }
 
-  // 4. Default clean empty placeholder
+  // 4. Empty placeholder
   return {
     projectId: '',
     appId: '',
@@ -71,6 +70,11 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
     storageBucket: '',
     messagingSenderId: '',
   };
+}
+
+export function isFirebaseConfigured(): boolean {
+  const cfg = getActiveFirebaseConfig();
+  return Boolean(cfg.apiKey && cfg.projectId);
 }
 
 export function saveCustomFirebaseConfig(config: FirebaseConfigType): void {
@@ -83,15 +87,15 @@ export function resetToDefaultFirebaseConfig(): void {
 
 // Initialize Firebase App
 const activeConfig = getActiveFirebaseConfig();
-const hasCredentials = Boolean(activeConfig.apiKey && activeConfig.projectId);
+const hasCredentials = isFirebaseConfigured();
 
 export const app = getApps().length === 0 
   ? initializeApp(hasCredentials ? activeConfig : {
-      apiKey: "dummy-key-for-init",
-      projectId: "dummy-project",
+      apiKey: "AIzaSy_placeholder_key",
+      projectId: "placeholder-project",
       appId: "1:000:web:000",
-      authDomain: "dummy.firebaseapp.com",
-      storageBucket: "dummy.appspot.com",
+      authDomain: "placeholder.firebaseapp.com",
+      storageBucket: "placeholder.appspot.com",
     }) 
   : getApp();
 
