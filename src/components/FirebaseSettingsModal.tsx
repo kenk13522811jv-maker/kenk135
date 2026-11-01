@@ -37,7 +37,7 @@ export const FirebaseSettingsModal: React.FC<FirebaseSettingsModalProps> = ({
   lang,
 }) => {
   const [config, setConfig] = useState<FirebaseConfigType>(() => getActiveFirebaseConfig());
-  const [activeTab, setActiveTab] = useState<'form' | 'json' | 'deploy'>('form');
+  const [activeTab, setActiveTab] = useState<'form' | 'where' | 'json' | 'deploy'>('where');
   const [jsonInput, setJsonInput] = useState<string>('');
   const [testing, setTesting] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -148,15 +148,15 @@ VITE_FIREBASE_MESSAGING_SENDER_ID="${config.messagingSenderId || ''}"`;
             </div>
             <div>
               <h3 className="font-bold text-slate-100 text-base sm:text-lg flex items-center gap-2">
-                <span>{lang === 'bn' ? 'Firebase কনফিগারেশন ও ডিপ্লয়মেন্ট' : 'Firebase Configuration & Deployment'}</span>
+                <span>{lang === 'bn' ? 'Firebase কনফিগারেশন ও লোকেশন গাইড' : 'Firebase Configuration & Location Guide'}</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                  Storage & Firestore
+                  Firestore & Storage
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
                 {lang === 'bn' 
-                  ? 'গিটহাবে লিক ছাড়াই রেন্ডার (Render) এ ডিপ্লয় করার নিরাপদ নিয়মাবলী'
-                  : 'Safe credentials management and GitHub / Render deployment instructions'}
+                  ? 'ফায়ারবেসে কোথায় ফাইল সেভ হয় এবং কেন render.com লিংকে থাকে'
+                  : 'How assets are stored in Firebase and how universal CDN links work'}
               </p>
             </div>
           </div>
@@ -173,6 +173,17 @@ VITE_FIREBASE_MESSAGING_SENDER_ID="${config.messagingSenderId || ''}"`;
         <div className="px-5 pt-3 border-b border-slate-800/80 bg-slate-950/40 flex items-center justify-between overflow-x-auto">
           <div className="flex gap-2">
             <button
+              onClick={() => setActiveTab('where')}
+              className={`pb-2 px-3 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+                activeTab === 'where'
+                  ? 'border-amber-500 text-amber-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'ফায়ারবেসে কোথায় সেভ হয়?' : 'Where in Firebase?'}</span>
+            </button>
+            <button
               onClick={() => setActiveTab('form')}
               className={`pb-2 px-3 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === 'form'
@@ -181,16 +192,6 @@ VITE_FIREBASE_MESSAGING_SENDER_ID="${config.messagingSenderId || ''}"`;
               }`}
             >
               {lang === 'bn' ? 'ক্রেডেনশিয়াল ভিউ' : 'Credentials'}
-            </button>
-            <button
-              onClick={() => setActiveTab('json')}
-              className={`pb-2 px-3 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
-                activeTab === 'json'
-                  ? 'border-amber-500 text-amber-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {lang === 'bn' ? 'JSON পেস্ট' : 'Paste JSON'}
             </button>
             <button
               onClick={() => setActiveTab('deploy')}
@@ -202,6 +203,16 @@ VITE_FIREBASE_MESSAGING_SENDER_ID="${config.messagingSenderId || ''}"`;
             >
               <Server className="w-3.5 h-3.5" />
               <span>{lang === 'bn' ? 'গিটহাব ও Render ডিপ্লয়' : 'GitHub & Render'}</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('json')}
+              className={`pb-2 px-3 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                activeTab === 'json'
+                  ? 'border-amber-500 text-amber-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {lang === 'bn' ? 'JSON পেস্ট' : 'Paste JSON'}
             </button>
           </div>
 
@@ -224,7 +235,71 @@ VITE_FIREBASE_MESSAGING_SENDER_ID="${config.messagingSenderId || ''}"`;
             </div>
           )}
 
-          {activeTab === 'deploy' ? (
+          {activeTab === 'where' ? (
+            /* ================= WHERE IN FIREBASE & WHY ONRENDER ================= */
+            <div className="space-y-4 text-xs text-slate-300">
+              {/* Question 1: Where in Firebase */}
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2.5">
+                <div className="font-bold flex items-center gap-2 text-sm text-amber-300">
+                  <Database className="w-4 h-4 text-amber-400" />
+                  <span>{lang === 'bn' ? '১. ফায়ারবেসে আপনার ডেটা কোথায় সেভ হচ্ছে এবং কেন দেখতে পাননি?' : '1. Where is data stored in Firebase & why was it hidden?'}</span>
+                </div>
+                <p className="leading-relaxed text-slate-300">
+                  {lang === 'bn' 
+                    ? 'আপনার আপলোড করা প্রতিটি ফাইলের সম্পূর্ণ তথ্য (ID, নাম, সাইজ, পাবলিক লিংক, মেয়াদের সময়) ফায়ারবেস ক্লাউড ফায়ারস্টোর (Cloud Firestore) ডাটাবেসে সেভ হচ্ছে।' 
+                    : 'All uploaded asset metadata is stored in Cloud Firestore.'}
+                </p>
+                <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 space-y-1.5 font-mono text-[11px]">
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Database ID:</span>
+                    <span className="text-amber-400 font-semibold">{config.firestoreDatabaseId || 'ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb'}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Collection Name:</span>
+                    <span className="text-emerald-400 font-semibold">assets</span>
+                  </div>
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Project ID:</span>
+                    <span className="text-sky-300">{config.projectId}</span>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-orange-950/40 border border-orange-500/30 text-orange-200 text-[11px] leading-relaxed">
+                  <span className="font-bold text-amber-400">গুরুত্বপূর্ণ কারণ: </span>
+                  ফায়ারবেস কনসোল খুললে ডিফল্টভাবে <strong>(default)</strong> নামের খালি ডাটাবেস খোলে। আপনার ডাটাবেসটি AI Studio একটি ডেডিকেটেড আইডি (<code className="text-amber-300 font-mono">ai-studio-cloudflarer2file...</code>) দিয়ে প্রোভিশন করেছে। Firebase Console-এ গিয়ে ডাটাবেস ড্রপডাউন থেকে এই নামটি সিলেক্ট করলেই আপনার সব ফাইল দেখতে পাবেন!
+                </div>
+
+                <a
+                  href={`https://console.firebase.google.com/project/${config.projectId}/firestore/databases/${config.firestoreDatabaseId || 'ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb'}/data`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs shadow-md shadow-amber-500/20 transition-all"
+                >
+                  <Flame className="w-4 h-4 text-slate-950" />
+                  <span>{lang === 'bn' ? 'সরাসরি ফায়ারবেস কনসোলে এই ডাটাবেসটি খুলুন ↗' : 'Open in Firebase Console ↗'}</span>
+                </a>
+              </div>
+
+              {/* Question 2: Why kenk135.onrender.com in URL */}
+              <div className="p-4 rounded-2xl bg-sky-950/40 border border-sky-500/30 text-sky-200 space-y-2">
+                <div className="font-bold flex items-center gap-2 text-sm text-sky-300">
+                  <Server className="w-4 h-4 text-sky-400" />
+                  <span>{lang === 'bn' ? '২. লিংকের সাথে কেন kenk135.onrender.com থাকতেছে?' : '2. Why does the public URL have kenk135.onrender.com?'}</span>
+                </div>
+                <div className="space-y-2 text-slate-300 leading-relaxed text-[11px]">
+                  <p>
+                    • <strong>১ সেকেন্ডে দ্রুত আপলোড:</strong> আপনার সাইটটি Render (<code className="text-amber-300">kenk135.onrender.com</code>) এ হোস্ট করা। ব্রাউজার থেকে সরাসরি গুগল ফায়ারবেস স্টোরেজে আপলোড করতে গেলে Google-এর CORS পলিসি রেন্ডার ডোমেইনকে ব্লক করছিল (যার কারণে আগে ১০% এ আটকে থাকত)।
+                  </p>
+                  <p>
+                    • <strong>ইউনিভার্সাল এআই ভিডিও অ্যাক্সেস:</strong> ফায়ারবেস স্টোরেজের লিংকগুলোতে বড় টোকেন থাকে এবং অন্য সফটওয়্যার থেকে ডাউনলোড করতে গেলে প্রায়ই ব্লক হয়। কিন্তু <code className="text-sky-300">https://kenk135.onrender.com/api/public/...</code> লিংকটি হলো আপনার সার্ভারের হাই-স্পিড সিডিএন রুট, যা <strong>Runway, Pika, Kling, Luma</strong>-র মতো এআই ভিডিও প্ল্যাটফর্ম যেকোনো বাধা ছাড়া সরাসরি ও সাথে সাথে এক সেকেন্ডে ডাউনলোড করে ভিডিও তৈরি করতে পারে।
+                  </p>
+                  <p>
+                    • <strong>অটো-ডিলিট সুরক্ষা:</strong> নির্দিষ্ট মেয়াদ (১/২/৩ দিন) শেষ হলে আপনার রেন্ডার সার্ভার ও ফায়ারবেস ডেটাবেস উভয় জায়গা থেকেই স্বয়ংক্রিয়ভাবে মুছে স্পেস খালি হয়ে যায়।
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : activeTab === 'deploy' ? (
             /* ================= GITHUB & RENDER GUIDE ================= */
             <div className="space-y-4 text-xs text-slate-300">
               <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 space-y-2">

@@ -15,13 +15,16 @@ import {
   Film, 
   ImageIcon,
   Sparkles,
-  AlertTriangle
+  AlertTriangle,
+  Database,
+  X
 } from 'lucide-react';
 import { Flame } from 'lucide-react';
 import { UploadedFileItem, Language } from '../types';
 import { translations } from '../services/translations';
 import { deleteAsset, runAutomatedCleanup } from '../services/assetService';
 import { getFileBlobForDownload } from '../services/r2Service';
+import { getActiveFirebaseConfig } from '../services/firebase';
 
 interface DashboardProps {
   files: UploadedFileItem[];
@@ -93,6 +96,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onPreview,
 }) => {
   const t = translations[lang];
+  const fbConfig = getActiveFirebaseConfig();
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterType, setFilterType] = useState<'all' | 'image' | 'video' | 'expiring' | 'permanent'>('all');
@@ -100,6 +104,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [fileToDelete, setFileToDelete] = useState<UploadedFileItem | null>(null);
+  const [inspectingFirebaseFile, setInspectingFirebaseFile] = useState<UploadedFileItem | null>(null);
+  const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
   // Filtered files
   const filteredFiles = useMemo(() => {
@@ -375,6 +381,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   </button>
 
                   <button
+                    onClick={() => setInspectingFirebaseFile(file)}
+                    title={lang === 'bn' ? 'ফায়ারবেস রেকর্ড দেখুন' : 'View Firebase Record'}
+                    className="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors"
+                  >
+                    <Flame className="w-3.5 h-3.5" />
+                  </button>
+
+                  <button
                     onClick={() => onPreview(file)}
                     title={t.previewFile}
                     className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
@@ -468,6 +482,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           {isCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                         </button>
                         <button
+                          onClick={() => setInspectingFirebaseFile(file)}
+                          className="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                          title={lang === 'bn' ? 'ফায়ারবেস রেকর্ড দেখুন' : 'View Firebase Record'}
+                        >
+                          <Flame className="w-3.5 h-3.5" />
+                        </button>
+                        <button
                           onClick={() => onPreview(file)}
                           className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
                           title={t.previewFile}
@@ -526,6 +547,129 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 className="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white"
               >
                 {deletingId ? 'Deleting...' : t.confirm}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal for Inspecting Firebase Firestore Data */}
+      {inspectingFirebaseFile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                  <Flame className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base text-slate-100 flex items-center gap-2">
+                    <span>{lang === 'bn' ? 'ফায়ারবেস ক্লাউড ফায়ারস্টোর রেকর্ড' : 'Cloud Firestore Record'}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                      LIVE IN FIRESTORE
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    {lang === 'bn' ? 'ফায়ারবেসে এই ফাইলটির সংরক্ষিত আসল ডেটা' : 'Exact metadata stored in Firestore'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setInspectingFirebaseFile(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="my-4 space-y-3 overflow-y-auto">
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono space-y-1.5">
+                <div className="flex items-center justify-between text-slate-400">
+                  <span>Database ID:</span>
+                  <span className="text-amber-400 font-semibold truncate max-w-[240px]">
+                    {fbConfig.firestoreDatabaseId || 'ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-slate-400">
+                  <span>Collection:</span>
+                  <span className="text-emerald-400 font-semibold">assets</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-400">
+                  <span>Document ID:</span>
+                  <span className="text-sky-300 font-semibold truncate max-w-[200px]">{inspectingFirebaseFile.id}</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5 text-xs text-slate-300 font-semibold">
+                  <span>Firestore Document Payload (JSON):</span>
+                  <button
+                    onClick={() => {
+                      const payload = {
+                        id: inspectingFirebaseFile.id,
+                        name: inspectingFirebaseFile.name,
+                        size: inspectingFirebaseFile.size,
+                        type: inspectingFirebaseFile.type,
+                        category: inspectingFirebaseFile.category,
+                        publicUrl: inspectingFirebaseFile.publicUrl,
+                        storagePath: inspectingFirebaseFile.storageKey,
+                        storageProvider: inspectingFirebaseFile.storageProvider,
+                        uploadedAt: inspectingFirebaseFile.uploadedAt,
+                        expiresAt: inspectingFirebaseFile.expiresAt || 0,
+                        retention: inspectingFirebaseFile.retention,
+                        isExpired: false,
+                      };
+                      navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                      setCopiedJson(true);
+                      setTimeout(() => setCopiedJson(false), 2000);
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-amber-400 hover:text-amber-300"
+                  >
+                    {copiedJson ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedJson ? 'কপি হয়েছে' : 'কপি JSON'}</span>
+                  </button>
+                </div>
+                <pre className="p-3 bg-slate-950 border border-slate-800 rounded-xl font-mono text-[11px] text-slate-300 overflow-x-auto max-h-48 select-all">
+                  {JSON.stringify({
+                    id: inspectingFirebaseFile.id,
+                    name: inspectingFirebaseFile.name,
+                    size: inspectingFirebaseFile.size,
+                    type: inspectingFirebaseFile.type,
+                    category: inspectingFirebaseFile.category,
+                    publicUrl: inspectingFirebaseFile.publicUrl,
+                    storagePath: inspectingFirebaseFile.storageKey,
+                    storageProvider: inspectingFirebaseFile.storageProvider,
+                    uploadedAt: inspectingFirebaseFile.uploadedAt,
+                    expiresAt: inspectingFirebaseFile.expiresAt || 0,
+                    retention: inspectingFirebaseFile.retention,
+                    isExpired: false,
+                  }, null, 2)}
+                </pre>
+              </div>
+
+              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-[11px] text-amber-300 leading-relaxed">
+                {lang === 'bn' 
+                  ? 'এই তথ্যগুলো ক্লাউড ফায়ারস্টোর ডাটাবেসে সেভ থাকার কারণেই পেজ রিলোড বা যেকোনো ডিভাইস থেকে ওপেন করলেও ফাইলটি সবসময় পাওয়া যায়।'
+                  : 'This metadata in Firestore allows the asset to persist across reloads and multi-device sessions.'}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-3">
+              <a
+                href={`https://console.firebase.google.com/project/${fbConfig.projectId}/firestore/databases/${fbConfig.firestoreDatabaseId || 'ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb'}/data`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>{lang === 'bn' ? 'Firebase Console এ ডাটাবেস খুলুন ↗' : 'Open Firebase Console ↗'}</span>
+              </a>
+
+              <button
+                onClick={() => setInspectingFirebaseFile(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >
+                {lang === 'bn' ? 'বন্ধ করুন' : 'Close'}
               </button>
             </div>
           </div>
