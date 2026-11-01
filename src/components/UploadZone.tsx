@@ -14,17 +14,20 @@ import {
   Sparkles,
   Bot,
   Link2,
-  Globe
+  Globe,
+  Layers,
+  FileCheck2,
+  ListOrdered
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { RetentionOption, UploadedFileItem, Language } from '../types';
-import { uploadAsset, uploadAssetFromUrl, cancelCurrentUpload } from '../services/assetService';
+import { uploadAsset, uploadMultipleAssets, uploadAssetFromUrl, cancelCurrentUpload } from '../services/assetService';
 import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
 import { translations } from '../services/translations';
 
 interface UploadZoneProps {
   lang: Language;
-  onUploadSuccess: (item: UploadedFileItem) => void;
+  onUploadSuccess: (itemOrItems: UploadedFileItem | UploadedFileItem[]) => void;
   onOpenFirebaseSettings: () => void;
 }
 
@@ -36,24 +39,27 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
   const t = translations[lang];
   const fbConfig = getActiveFirebaseConfig();
 
-  // Mode: 'file' (Drag & Drop) vs 'url' (Paste Link)
+  // Mode: 'file' (Drag & Drop multiple) vs 'url' (Paste Link)
   const [inputMode, setInputMode] = useState<'file' | 'url'>('file');
 
   const [dragActive, setDragActive] = useState<boolean>(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [filePreviews, setFilePreviews] = useState<{ [key: string]: string }>({});
+
   // URL Mode state
   const [pastedUrl, setPastedUrl] = useState<string>('');
   const [urlPreviewValid, setUrlPreviewValid] = useState<boolean>(false);
-  const [isCheckingUrl, setIsCheckingUrl] = useState<boolean>(false);
 
   const [retention, setRetention] = useState<RetentionOption>('permanent');
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
-  const [lastUploaded, setLastUploaded] = useState<UploadedFileItem | null>(null);
-  const [copied, setCopied] = useState<boolean>(false);
-  const [showQr, setShowQr] = useState<boolean>(false);
+  const [uploadStatusText, setUploadStatusText] = useState<string>('');
+
+  // Batch upload results
+  const [uploadedResults, setUploadedResults] = useState<UploadedFileItem[]>([]);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState<boolean>(false);
+  const [qrCodeFileId, setQrCodeFileId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -68,8 +74,20 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
   };
 
-  const processFile = (file: File) => {
-    if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) {
+  const processFiles = (files: File[]) => {
+    const validFiles: File[] = [];
+    const newPreviews: { [key: string]: string } = {};
+
+    for (const file of files) {
+      if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
+        validFiles.push(file);
+        try {
+          newPreviews[file.name] = URL.createObjectURL(file);
+        } catch {}
+      }
+    }
+
+    if (validFiles.length === 0) {
       setErrorMessage(
         lang === 'bn' 
           ? 'শুধুমাত্র ছবি বা ভিডিও ফাইল আপলোড করা যাবে।' 
@@ -79,11 +97,9 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
 
     setErrorMessage(null);
-    setLastUploaded(null);
-    setSelectedFile(file);
-
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
+    setUploadedResults([]);
+    setSelectedFiles((prev) => [...prev, ...validFiles]);
+    setFilePreviews((prev) => ({ ...prev, ...newPreviews }));
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
@@ -91,15 +107,23 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     e.stopPropagation();
     setDragActive(false);
 
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFiles(Array.from(e.dataTransfer.files));
     }
   };
 
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      processFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      processFiles(Array.from(e.target.files));
     }
+  };
+
+  const handleRemoveFile = (index: number) => {
+    const fileToRemove = selectedFiles[index];
+    if (fileToRemove && filePreviews[fileToRemove.name]) {
+      URL.revokeObjectURL(filePreviews[fileToRemove.name]);
+    }
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleClearSelection = async () => {
@@ -108,14 +132,13 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         await cancelCurrentUpload();
       } catch {}
     }
-    if (previewUrl && selectedFile) {
-      URL.revokeObjectURL(previewUrl);
-    }
-    setSelectedFile(null);
-    setPreviewUrl(null);
+    Object.values(filePreviews).forEach((url) => URL.revokeObjectURL(url));
+    setSelectedFiles([]);
+    setFilePreviews({});
     setPastedUrl('');
     setUrlPreviewValid(false);
     setUploadProgress(0);
+    setUploadStatusText('');
     setIsUploading(false);
     setErrorMessage(null);
     if (fileInputRef.current) {
@@ -139,40 +162,70 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
   };
 
-  // Upload either selected File or Pasted URL
+  // Start Upload (Single URL or Multiple Files in Batch)
   const handleStartUpload = async () => {
-    if (inputMode === 'file' && !selectedFile) return;
+    if (inputMode === 'file' && selectedFiles.length === 0) return;
     if (inputMode === 'url' && !pastedUrl.trim()) return;
 
     setIsUploading(true);
-    setUploadProgress(20);
+    setUploadProgress(5);
     setErrorMessage(null);
+    setUploadedResults([]);
 
     try {
-      let item: UploadedFileItem;
-
       if (inputMode === 'url') {
-        item = await uploadAssetFromUrl(pastedUrl.trim(), retention, (pct) => {
+        setUploadStatusText(lang === 'bn' ? 'URL প্রসেস করা হচ্ছে...' : 'Processing URL...');
+        const item = await uploadAssetFromUrl(pastedUrl.trim(), retention, (pct) => {
           setUploadProgress(pct);
         });
+        setUploadedResults([item]);
+        onUploadSuccess(item);
       } else {
-        item = await uploadAsset(selectedFile!, selectedFile!.name, retention, (pct) => {
-          setUploadProgress(pct);
-        });
+        const total = selectedFiles.length;
+        if (total === 1) {
+          setUploadStatusText(lang === 'bn' ? 'Firebase এ আপলোড হচ্ছে...' : 'Uploading to Firebase...');
+          const item = await uploadAsset(selectedFiles[0], selectedFiles[0].name, retention, (pct) => {
+            setUploadProgress(pct);
+          });
+          setUploadedResults([item]);
+          onUploadSuccess(item);
+        } else {
+          // Bulk upload (10, 20, 30+ files)
+          const results = await uploadMultipleAssets(
+            selectedFiles,
+            retention,
+            (completed, totalCount, currentName, filePct) => {
+              const overallPct = Math.round(((completed + filePct / 100) / totalCount) * 100);
+              setUploadProgress(Math.min(99, overallPct));
+              setUploadStatusText(
+                lang === 'bn'
+                  ? `আপলোড হচ্ছে: ${completed + 1} / ${totalCount} (${currentName}) - ${filePct}%`
+                  : `Uploading: ${completed + 1} / ${totalCount} (${currentName}) - ${filePct}%`
+              );
+            }
+          );
+
+          if (results.length > 0) {
+            setUploadedResults(results);
+            onUploadSuccess(results);
+          } else {
+            throw new Error(lang === 'bn' ? 'কোনো ফাইল আপলোড করা যায়নি।' : 'No files could be uploaded.');
+          }
+        }
       }
 
-      setLastUploaded(item);
-      onUploadSuccess(item);
+      setUploadProgress(100);
 
       try {
         confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.7 },
+          particleCount: 60,
+          spread: 70,
+          origin: { y: 0.6 },
         });
       } catch {}
 
-      handleClearSelection();
+      // Clear selected input after successful upload
+      setSelectedFiles([]);
     } catch (err: any) {
       setErrorMessage(err?.message || 'Upload could not complete.');
     } finally {
@@ -180,15 +233,21 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
   };
 
-  const handleCopy = (text: string) => {
+  const handleCopySingle = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2500);
   };
 
-  const isVideo = selectedFile 
-    ? selectedFile.type.startsWith('video/')
-    : pastedUrl.match(/\.(mp4|webm|mov|ogg)($|\?)/i);
+  const handleCopyAllLinks = () => {
+    if (uploadedResults.length === 0) return;
+    const allLinks = uploadedResults.map((r) => r.publicUrl).join('\n');
+    navigator.clipboard.writeText(allLinks);
+    setCopiedAll(true);
+    setTimeout(() => setCopiedAll(false), 2500);
+  };
+
+  const totalSelectedSize = selectedFiles.reduce((acc, f) => acc + f.size, 0);
 
   return (
     <div className="w-full bg-slate-900/80 border border-slate-800 rounded-3xl p-6 sm:p-8 backdrop-blur-md shadow-2xl shadow-black/30">
@@ -202,64 +261,39 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             </span>
             <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-orange-500/10 text-orange-400 border border-orange-500/30 flex items-center gap-1">
               <Flame className="w-3 h-3" />
-              Firebase Storage & Firestore
+              Firebase Firestore Direct
+            </span>
+            <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/30 flex items-center gap-1">
+              <Layers className="w-3 h-3" />
+              Bulk Upload (10-30+)
             </span>
           </div>
           <h2 className="text-xl sm:text-2xl font-bold text-slate-100 flex items-center gap-2.5">
             <UploadCloud className="w-6 h-6 text-amber-400" />
-            <span>{lang === 'bn' ? 'এআই ভিডিও পাইপলাইন অ্যাসেট আপলোড' : 'AI Video Pipeline Asset Upload'}</span>
+            <span>{lang === 'bn' ? 'ফায়ারবেস অ্যাসেট আপলোড (সিঙ্গেল ও বাল্ক)' : 'Firebase Asset Upload (Single & Bulk)'}</span>
           </h2>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
             {lang === 'bn' 
-              ? 'ফাইল ড্র্যাগ-অ্যান্ড-ড্রপ করুন অথবা অনলাইন ইমেজ/ভিডিও লিংক পেস্ট করে Firebase-এ সেভ করুন।'
-              : 'Upload by drag-and-drop or paste any online image/video link to save into Firebase.'}
+              ? 'একসাথে ১০, ২০ বা ৩০+ ছবি/ভিডিও ড্রপ করুন। প্রতিটি ফাইল আলাদাভাবে Firebase-এ সেভ হবে এবং সিরিয়াল অনুযায়ী লিংক পাবেন।'
+              : 'Select 10, 20 or 30+ files at once. Every file is saved directly into Firebase and returns serial public links.'}
           </p>
         </div>
 
         {/* Current storage target indicator */}
         <button
           onClick={onOpenFirebaseSettings}
-          className={`flex items-center gap-2 self-start sm:self-auto rounded-xl px-3.5 py-2 text-xs transition-all border ${
-            isFirebaseConfigured()
-              ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
-              : 'bg-amber-950/60 border-amber-500/50 text-amber-300 animate-pulse'
-          }`}
+          className="flex items-center gap-2 self-start sm:self-auto rounded-xl px-3.5 py-2 text-xs transition-all border bg-emerald-950/50 border-emerald-500/40 text-emerald-300"
           title="Click to view or edit Firebase configuration"
         >
-          <Flame className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
+          <Flame className="w-4 h-4 text-amber-400 shrink-0" />
           <div className="text-left">
-            <div className="text-[10px] opacity-80 leading-none">Storage Target</div>
+            <div className="text-[10px] opacity-80 leading-none">Database Target</div>
             <div className="font-mono font-semibold truncate max-w-[150px] sm:max-w-[190px]">
-              {isFirebaseConfigured() ? (fbConfig.storageBucket || 'Firebase Storage') : '⚠️ Firebase Not Set'}
+              {fbConfig.firestoreDatabaseId || 'ai-studio-cloudflarer2file'}
             </div>
           </div>
         </button>
       </div>
-
-      {/* Warning banner when Firebase credentials are not yet set */}
-      {!isFirebaseConfigured() && (
-        <div className="mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs sm:text-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <Flame className="w-5 h-5 shrink-0 text-amber-400" />
-            <div>
-              <div className="font-bold text-amber-200">
-                {lang === 'bn' ? 'Firebase ক্রেডেনশিয়াল দেওয়া হয়নি' : 'Firebase Not Configured'}
-              </div>
-              <div className="text-[11px] text-slate-300 mt-0.5">
-                {lang === 'bn' 
-                  ? 'Render-এ ফাইল আপলোড করতে Render Dashboard > Environment Variables-এ কি-গুলো বসিয়ে দিন, অথবা এখনই Firebase কনফিগ-এ ক্লিক করে ইনপুট দিন।'
-                  : 'Add Firebase environment variables in Render Dashboard or click Configure to save directly into Firebase.'}
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={onOpenFirebaseSettings}
-            className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold shrink-0 text-xs shadow-md shadow-amber-500/20"
-          >
-            {lang === 'bn' ? 'Firebase কনফিগ করুন' : 'Configure Firebase'}
-          </button>
-        </div>
-      )}
 
       {/* Input Method Switcher (File vs URL) */}
       <div className="flex items-center gap-2 mt-5">
@@ -272,7 +306,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           }`}
         >
           <UploadCloud className="w-4 h-4" />
-          <span>{lang === 'bn' ? 'ফাইল আপলোড (Drag & Drop)' : 'File Upload (Drag & Drop)'}</span>
+          <span>{lang === 'bn' ? 'ফাইল আপলোড (মাল্টিপল / বাল্ক)' : 'File Upload (Multi / Bulk)'}</span>
         </button>
 
         <button
@@ -304,100 +338,142 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         </div>
       )}
 
-      {/* Success Banner if file just uploaded */}
-      {lastUploaded && (
-        <div className="mt-6 p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-emerald-950/60 to-slate-900/90 border border-emerald-500/30 shadow-lg animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+      {/* ================= BATCH RESULTS PANEL ================= */}
+      {uploadedResults.length > 0 && (
+        <div className="mt-6 p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-emerald-950/70 via-slate-900/90 to-slate-900 border border-emerald-500/40 shadow-xl animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
                 <Check className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-semibold text-slate-100 text-sm sm:text-base flex items-center gap-2">
-                  <span>{t.uploadSuccessTitle} ({lastUploaded.name})</span>
+                <h3 className="font-bold text-slate-100 text-sm sm:text-base flex items-center gap-2">
+                  <span>
+                    {lang === 'bn' 
+                      ? `${uploadedResults.length}টি ফাইল সফলভাবে Firebase এ আপলোড হয়েছে!` 
+                      : `${uploadedResults.length} files successfully saved to Firebase!`}
+                  </span>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    {lastUploaded.storageProvider === 'firebase-storage' ? 'Firebase Live' : 'Vault Saved'}
+                    Firebase Live
                   </span>
                 </h3>
-                <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-400">
-                  <span className="capitalize">{lastUploaded.category}</span>
-                  <span>•</span>
-                  <span>{(lastUploaded.size / (1024 * 1024)).toFixed(2)} MB</span>
-                  <span>•</span>
-                  <span className="text-emerald-400 font-medium">
-                    {lastUploaded.retention === 'permanent' 
-                      ? (lang === 'bn' ? 'স্থায়ী ফাইল (Permanent)' : 'Permanent Asset') 
-                      : (lang === 'bn' ? 'অটো-ডিলিট নির্ধারিত (Temporary)' : 'Auto-delete scheduled')}
-                  </span>
-                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {lang === 'bn' 
+                    ? 'ফাইলগুলো Firebase Firestore ডাটাবেসের assets কালেকশনে সংরক্ষিত হয়েছে।' 
+                    : 'All assets saved directly into Firestore collection assets.'}
+                </p>
               </div>
             </div>
 
-            <button
-              onClick={() => setLastUploaded(null)}
-              className="text-slate-400 hover:text-slate-200 text-xs p-1"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              {uploadedResults.length > 1 && (
+                <button
+                  onClick={handleCopyAllLinks}
+                  className={`flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-md ${
+                    copiedAll
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20'
+                  }`}
+                >
+                  {copiedAll ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedAll ? (lang === 'bn' ? 'সব কপি হয়েছে!' : 'All Copied!') : (lang === 'bn' ? 'সব লিংক কপি করুন (Copy All)' : 'Copy All Links')}</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setUploadedResults([])}
+                className="text-slate-400 hover:text-slate-200 text-xs p-2 rounded-lg bg-slate-800/60 hover:bg-slate-800"
+                title="Dismiss"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
-          {/* Public Link Box */}
-          <div className="mt-4 pt-3 border-t border-slate-800">
-            <label className="block text-xs font-medium text-slate-300 mb-1.5 flex items-center justify-between">
-              <span>{t.publicUrlLabel}</span>
-              <span className="text-[10px] text-amber-400 font-normal">
-                {lang === 'bn' ? '✓ AI ভিডিও পাইপলাইনে সরাসরি ব্যবহারের জন্য প্রস্তুত' : '✓ Direct public link for video generation pipeline'}
-              </span>
-            </label>
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs sm:text-sm font-mono text-sky-300 overflow-x-auto truncate">
-                {lastUploaded.publicUrl}
+          {/* Serial List of Uploaded Assets */}
+          <div className="mt-4 space-y-2.5 max-h-96 overflow-y-auto pr-1">
+            {uploadedResults.map((item, idx) => (
+              <div 
+                key={item.id}
+                className="p-3 bg-slate-950/70 border border-slate-800/90 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 hover:border-slate-700 transition-colors"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="w-6 h-6 rounded-full bg-slate-800 border border-slate-700 text-amber-400 font-mono text-xs flex items-center justify-center shrink-0 font-bold">
+                    #{idx + 1}
+                  </span>
+
+                  <div className="w-10 h-10 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden flex items-center justify-center shrink-0">
+                    {item.category === 'video' ? (
+                      <Film className="w-5 h-5 text-sky-400" />
+                    ) : (
+                      <img 
+                        src={item.publicUrl} 
+                        alt={item.name} 
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          (e.target as HTMLElement).style.display = 'none';
+                        }}
+                      />
+                    )}
+                  </div>
+
+                  <div className="min-w-0">
+                    <h4 className="text-xs sm:text-sm font-semibold text-slate-200 truncate" title={item.name}>
+                      {item.name}
+                    </h4>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      {(item.size / (1024 * 1024)).toFixed(2)} MB • {item.retention}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 md:w-64 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono text-sky-300 truncate">
+                    {item.publicUrl}
+                  </div>
+
+                  <button
+                    onClick={() => handleCopySingle(item.id, item.publicUrl)}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                      copiedId === item.id
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold'
+                    }`}
+                  >
+                    {copiedId === item.id ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedId === item.id ? 'কপি হয়েছে' : 'কপি লিংক'}</span>
+                  </button>
+
+                  <a
+                    href={item.publicUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 shrink-0"
+                    title="Open Link"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+
+                  <button
+                    onClick={() => setQrCodeFileId(qrCodeFileId === item.id ? null : item.id)}
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 shrink-0"
+                    title="QR Code"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {qrCodeFileId === item.id && (
+                  <div className="w-full mt-2 pt-2 border-t border-slate-800 flex justify-center">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(item.publicUrl)}`}
+                      alt="QR Code"
+                      className="w-28 h-28 rounded-lg bg-white p-2"
+                    />
+                  </div>
+                )}
               </div>
-
-              <button
-                onClick={() => handleCopy(lastUploaded.publicUrl)}
-                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 ${
-                  copied
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                }`}
-              >
-                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                <span>{copied ? t.copied : t.copyLink}</span>
-              </button>
-
-              <button
-                onClick={() => setShowQr(!showQr)}
-                title="Show QR Code"
-                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0"
-              >
-                <QrCode className="w-4 h-4" />
-              </button>
-
-              <a
-                href={lastUploaded.publicUrl}
-                target="_blank"
-                rel="noreferrer"
-                title="Open Link"
-                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0"
-              >
-                <ExternalLink className="w-4 h-4" />
-              </a>
-            </div>
-
-            {/* QR Code display */}
-            {showQr && (
-              <div className="mt-3 p-4 bg-slate-950 border border-slate-800 rounded-xl flex flex-col items-center justify-center gap-2">
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(lastUploaded.publicUrl)}`}
-                  alt="QR Code"
-                  className="w-36 h-36 rounded-lg bg-white p-2"
-                />
-                <span className="text-[11px] text-slate-400">
-                  {lang === 'bn' ? 'মোবাইল দিয়ে স্ক্যান করে লিংকটি খুলুন' : 'Scan with mobile to open direct asset'}
-                </span>
-              </div>
-            )}
+            ))}
           </div>
         </div>
       )}
@@ -440,31 +516,6 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
               )}
             </div>
 
-            {/* URL Live Preview Card */}
-            {urlPreviewValid && (
-              <div className="mt-4 p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex flex-col items-center justify-center">
-                <span className="text-[11px] text-slate-400 mb-2 font-medium">
-                  {lang === 'bn' ? 'ইমেজ / ভিডিও লাইভ প্রিভিউ:' : 'Media Live Preview:'}
-                </span>
-                {isVideo ? (
-                  <video
-                    src={pastedUrl}
-                    controls
-                    className="max-h-56 max-w-full rounded-xl object-contain shadow-md"
-                  />
-                ) : (
-                  <img
-                    src={pastedUrl}
-                    alt="Pasted Preview"
-                    className="max-h-56 max-w-full rounded-xl object-contain shadow-md"
-                    onError={() => {
-                      // Some hotlinked images might block direct hotlink rendering
-                    }}
-                  />
-                )}
-              </div>
-            )}
-
             {/* Retention Selector for URL */}
             <div className="mt-6">
               <label className="block text-xs font-semibold text-slate-300 mb-2 flex items-center justify-between">
@@ -495,37 +546,14 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                         : 'border-slate-800 bg-slate-900/60 hover:bg-slate-900 text-slate-300'
                     }`}
                   >
-                    <div className="font-semibold text-xs sm:text-sm">
-                      {opt.label}
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
-                      {opt.desc}
-                    </div>
+                    <div className="font-semibold text-xs sm:text-sm">{opt.label}</div>
+                    <div className="text-[11px] text-slate-400 mt-1">{opt.desc}</div>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Upload Progress Bar if active */}
-            {isUploading && (
-              <div className="mt-5">
-                <div className="flex justify-between text-xs text-slate-400 mb-1.5">
-                  <span className="flex items-center gap-1.5">
-                    <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                    <span>{lang === 'bn' ? 'Firebase ও ভল্টে প্রসেসিং হচ্ছে...' : 'Processing and saving into Firebase...'}</span>
-                  </span>
-                  <span className="font-mono text-amber-400">{uploadProgress}%</span>
-                </div>
-                <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-amber-500 to-orange-500 transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Action Buttons for URL */}
+            {/* Action Button for URL */}
             <div className="mt-6 flex gap-3">
               <button
                 onClick={handleStartUpload}
@@ -540,24 +568,14 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                 ) : (
                   <>
                     <Flame className="w-4 h-4 text-slate-950" />
-                    <span>{lang === 'bn' ? 'লিংক সেভ ও পাবলিক URL তৈরি করুন' : 'Save URL & Generate Public Link'}</span>
+                    <span>{lang === 'bn' ? 'Firebase-এ সংরক্ষণ ও পাবলিক লিংক তৈরি' : 'Save to Firebase & Generate Public Link'}</span>
                   </>
                 )}
               </button>
-
-              {isUploading && (
-                <button
-                  type="button"
-                  onClick={handleClearSelection}
-                  className="px-4 py-3 rounded-xl text-sm font-medium border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 transition-colors"
-                >
-                  {t.cancel}
-                </button>
-              )}
             </div>
           </div>
-        ) : !selectedFile ? (
-          /* ================= FILE DRAG & DROP MODE ================= */
+        ) : selectedFiles.length === 0 ? (
+          /* ================= DRAG & DROP MULTIPLE FILES MODE ================= */
           <div
             onDragEnter={handleDrag}
             onDragLeave={handleDrag}
@@ -573,6 +591,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept="image/*,video/*"
               className="hidden"
               onChange={handleFileInputChange}
@@ -583,10 +602,12 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             </div>
 
             <h3 className="text-base sm:text-lg font-semibold text-slate-100 group-hover:text-amber-400 transition-colors">
-              {t.dragDropHeading}
+              {lang === 'bn' ? 'একসাথে এক বা একাধিক (১০, ২০, ৩০+) ফাইল ড্র্যাগ করুন' : 'Drop one or multiple (10, 20, 30+) files here'}
             </h3>
             <p className="text-xs sm:text-sm text-slate-400 max-w-md mt-1.5">
-              {t.dragDropSub}
+              {lang === 'bn' 
+                ? 'কম্পিউটার থেকে ক্লিক করে যেকোনো সংখ্যক ছবি বা ভিডিও সিলেক্ট করুন।' 
+                : 'Click to browse or drop any number of image/video assets.'}
             </p>
 
             <div className="flex items-center gap-3 mt-5 flex-wrap justify-center">
@@ -600,55 +621,88 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
               </span>
               <span className="flex items-center gap-1.5 text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-full font-medium">
                 <Sparkles className="w-3.5 h-3.5" />
-                Auto AI Video Ingestion
+                Multi-Asset Ingestion
               </span>
             </div>
           </div>
         ) : (
-          /* ================= FILE SELECTED STATE ================= */
+          /* ================= MULTIPLE FILES SELECTED VIEW ================= */
           <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-5 sm:p-6">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <div className="flex items-center gap-3 truncate">
+              <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
-                  {isVideo ? <Film className="w-5 h-5" /> : <ImageIcon className="w-5 h-5" />}
+                  <Layers className="w-5 h-5" />
                 </div>
-                <div className="truncate">
-                  <h4 className="font-semibold text-slate-200 text-sm truncate">
-                    {selectedFile.name}
+                <div>
+                  <h4 className="font-semibold text-slate-200 text-sm">
+                    {lang === 'bn' 
+                      ? `${selectedFiles.length}টি ফাইল সিলেক্ট করা হয়েছে` 
+                      : `${selectedFiles.length} files selected`}
                   </h4>
-                  <span className="text-xs text-slate-400">
-                    {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • {selectedFile.type}
+                  <span className="text-xs text-slate-400 font-mono">
+                    {(totalSelectedSize / (1024 * 1024)).toFixed(2)} MB মোট সাইজ • Firebase Firestore এ সংরক্ষিত হবে
                   </span>
                 </div>
               </div>
 
-              <button
-                onClick={handleClearSelection}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-                title="Cancel selection"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                >
+                  + {lang === 'bn' ? 'আরও যোগ করুন' : 'Add More'}
+                </button>
+                <button
+                  onClick={handleClearSelection}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                  title="Clear all"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            {/* Media visual preview */}
-            <div className="my-5 flex justify-center bg-slate-900/50 rounded-xl p-3 border border-slate-800/60">
-              {isVideo ? (
-                <video
-                  src={previewUrl || ''}
-                  controls
-                  className="max-h-64 rounded-lg object-contain"
-                />
-              ) : (
-                <img
-                  src={previewUrl || ''}
-                  alt="Preview"
-                  className="max-h-64 rounded-lg object-contain shadow-md"
-                />
-              )}
+            {/* Selected Files Preview List / Carousel */}
+            <div className="my-4 max-h-64 overflow-y-auto space-y-2 pr-1">
+              {selectedFiles.map((f, i) => (
+                <div 
+                  key={`${f.name}-${i}`}
+                  className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/80 text-xs"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="w-5 h-5 rounded-full bg-slate-800 text-slate-400 font-mono text-[10px] flex items-center justify-center shrink-0">
+                      {i + 1}
+                    </span>
+                    <div className="w-8 h-8 rounded-lg bg-slate-800 overflow-hidden flex items-center justify-center shrink-0">
+                      {f.type.startsWith('video/') ? (
+                        <Film className="w-4 h-4 text-sky-400" />
+                      ) : (
+                        <img 
+                          src={filePreviews[f.name]} 
+                          alt="" 
+                          className="w-full h-full object-cover" 
+                        />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-medium text-slate-200 truncate max-w-[200px] sm:max-w-xs">{f.name}</div>
+                      <div className="text-[10px] text-slate-400 font-mono">{(f.size / (1024 * 1024)).toFixed(2)} MB</div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleRemoveFile(i)}
+                    disabled={isUploading}
+                    className="p-1 text-slate-400 hover:text-rose-400 transition-colors"
+                    title="Remove"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
             </div>
 
-            {/* Retention Policy Selection */}
+            {/* Retention Policy Selection for Batch */}
             <div className="mt-5">
               <label className="block text-xs font-semibold text-slate-300 mb-2 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
@@ -656,7 +710,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                   <span>{t.retentionLabel}</span>
                 </span>
                 <span className="text-[11px] text-slate-400">
-                  {lang === 'bn' ? 'মেয়াদ শেষে Firebase Storage ও ড্যাশবোর্ড থেকে অটো-ডিলিট হবে' : 'Automatically purged from Firebase on expiry'}
+                  {lang === 'bn' ? 'মেয়াদ শেষে Firebase থেকে স্বয়ংক্রিয়ভাবে মুছে যাবে' : 'Auto-purged on expiry from Firebase'}
                 </span>
               </label>
 
@@ -678,12 +732,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                         : 'border-slate-800 bg-slate-900/60 hover:bg-slate-900 text-slate-300'
                     }`}
                   >
-                    <div className="font-semibold text-xs sm:text-sm">
-                      {opt.label}
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
-                      {opt.desc}
-                    </div>
+                    <div className="font-semibold text-xs sm:text-sm">{opt.label}</div>
+                    <div className="text-[11px] text-slate-400 mt-1">{opt.desc}</div>
                   </button>
                 ))}
               </div>
@@ -695,7 +745,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                 <div className="flex justify-between text-xs text-slate-400 mb-1.5">
                   <span className="flex items-center gap-1.5">
                     <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                    <span>{lang === 'bn' ? 'Firebase ও ভল্টে প্রসেসিং হচ্ছে...' : 'Uploading and storing in Firebase...'}</span>
+                    <span>{uploadStatusText || (lang === 'bn' ? 'Firebase এ সেভ হচ্ছে...' : 'Saving into Firebase...')}</span>
                   </span>
                   <span className="font-mono text-amber-400">{uploadProgress}%</span>
                 </div>
@@ -723,7 +773,11 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                 ) : (
                   <>
                     <Flame className="w-4 h-4 text-slate-950" />
-                    <span>{lang === 'bn' ? 'Firebase এ আপলোড ও লিংক তৈরি করুন' : 'Upload to Firebase & Generate URL'}</span>
+                    <span>
+                      {lang === 'bn' 
+                        ? `${selectedFiles.length}টি ফাইল Firebase এ আপলোড করুন` 
+                        : `Upload ${selectedFiles.length} files to Firebase`}
+                    </span>
                   </>
                 )}
               </button>

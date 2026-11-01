@@ -2,8 +2,17 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  getDoc, 
+  setDoc, 
+  deleteDoc, 
+  collection, 
+  getDocs 
+} from 'firebase/firestore';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,101 +20,26 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Ensure uploads and data directories exist
-const UPLOADS_DIR = path.resolve(__dirname, 'uploads');
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
+// Firebase Configuration (Direct Cloud Firestore Connection - No Local Disk Dependency)
+const firebaseConfig = {
+  projectId: process.env.VITE_FIREBASE_PROJECT_ID || 'gen-lang-client-0536368169',
+  appId: process.env.VITE_FIREBASE_APP_ID || '1:324552210220:web:b11d8cc1636bcad38f5e89',
+  apiKey: process.env.VITE_FIREBASE_API_KEY || 'AIzaSyAQ5V8D9oSjRiNSDppXHPN-NqXm0lnEE0Y',
+  authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN || 'gen-lang-client-0536368169.firebaseapp.com',
+  firestoreDatabaseId: process.env.VITE_FIREBASE_DATABASE_ID || 'ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb',
+  storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET || 'gen-lang-client-0536368169.firebasestorage.app',
+};
 
-const META_FILE = path.resolve(__dirname, 'uploads_meta.json');
+const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const fbDb = getFirestore(fbApp, firebaseConfig.firestoreDatabaseId);
 
-interface StoredAsset {
-  id: string;
-  name: string;
-  size: number;
-  type: string;
-  category: 'image' | 'video';
-  filePath: string;
-  publicUrl: string;
-  storageProvider: 'firebase-storage' | 'cloudflare-r2' | 'sandbox-local';
-  uploadedAt: number;
-  expiresAt: number | null;
-  retention: string;
-  isExpired: boolean;
-  downloadsCount: number;
-}
-
-function loadAssets(): StoredAsset[] {
-  try {
-    if (fs.existsSync(META_FILE)) {
-      const raw = fs.readFileSync(META_FILE, 'utf-8');
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.error('Error reading metadata file', e);
-  }
-  return [];
-}
-
-function saveAssets(assets: StoredAsset[]): void {
-  try {
-    fs.writeFileSync(META_FILE, JSON.stringify(assets, null, 2), 'utf-8');
-  } catch (e) {
-    console.error('Error saving metadata file', e);
-  }
-}
-
-// Background cleanup of expired files
-function cleanupExpired(): number {
-  const assets = loadAssets();
-  const now = Date.now();
-  const active: StoredAsset[] = [];
-  let deletedCount = 0;
-
-  for (const asset of assets) {
-    if (asset.expiresAt && now > asset.expiresAt) {
-      if (asset.filePath && fs.existsSync(asset.filePath)) {
-        try {
-          fs.unlinkSync(asset.filePath);
-        } catch (err) {
-          console.warn('Failed to delete file from disk:', err);
-        }
-      }
-      deletedCount++;
-    } else {
-      active.push(asset);
-    }
-  }
-
-  if (deletedCount > 0) {
-    saveAssets(active);
-    console.log(`[Auto-Retention] Cleaned up ${deletedCount} expired assets`);
-  }
-  return deletedCount;
-}
-
-// Run cleanup every 30 seconds
-setInterval(cleanupExpired, 30000);
-
-// Multer storage
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const safeName = file.originalname.replace(ext, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
-    const id = 'asset_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-    cb(null, `${id}_${safeName}${ext}`);
-  },
-});
-
+// In-Memory storage (RAM only, 0 disk footprint on Render)
 const upload = multer({
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB per file
 });
 
-// Middleware for CORS on API
+// CORS middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -116,183 +50,247 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+app.use(express.json({ limit: '60mb' }));
+app.use(express.urlencoded({ extended: true, limit: '60mb' }));
+
+// Helper to compute expiration
+function computeExpiresAt(retention: string, now: number): number | null {
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+  if (retention === '1day') return now + ONE_DAY;
+  if (retention === '2days') return now + 2 * ONE_DAY;
+  if (retention === '3days') return now + 3 * ONE_DAY;
+  return null;
+}
 
 // ================= API ROUTES =================
 
-// 1. File Upload (multipart/form-data)
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file received' });
-  }
-
-  const retention = (req.body.retention as string) || 'permanent';
-  const now = Date.now();
-  let expiresAt: number | null = null;
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-
-  if (retention === '1day') expiresAt = now + ONE_DAY;
-  else if (retention === '2days') expiresAt = now + 2 * ONE_DAY;
-  else if (retention === '3days') expiresAt = now + 3 * ONE_DAY;
-
-  const id = req.file.filename.split('_')[0] + '_' + req.file.filename.split('_')[1];
-  const isVideo = req.file.mimetype.startsWith('video/');
-  const category: 'image' | 'video' = isVideo ? 'video' : 'image';
-
-  // Construct absolute universal public URL
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.get('host') || `localhost:${PORT}`;
-  const publicUrl = `${protocol}://${host}/api/public/${id}`;
-
-  const newAsset: StoredAsset = {
-    id,
-    name: req.file.originalname,
-    size: req.file.size,
-    type: req.file.mimetype,
-    category,
-    filePath: req.file.path,
-    publicUrl,
-    storageProvider: 'firebase-storage',
-    uploadedAt: now,
-    expiresAt,
-    retention,
-    isExpired: false,
-    downloadsCount: 0,
-  };
-
-  const current = loadAssets();
-  current.unshift(newAsset);
-  saveAssets(current);
-
-  return res.json({ success: true, asset: newAsset });
-});
-
-// 2. Upload from URL (Paste Image/Video Link)
-app.post('/api/upload-url', async (req, res) => {
-  const { url, retention = 'permanent' } = req.body;
-  if (!url) {
-    return res.status(400).json({ error: 'URL is required' });
-  }
-
-  const now = Date.now();
-  let expiresAt: number | null = null;
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-
-  if (retention === '1day') expiresAt = now + ONE_DAY;
-  else if (retention === '2days') expiresAt = now + 2 * ONE_DAY;
-  else if (retention === '3days') expiresAt = now + 3 * ONE_DAY;
-
-  const id = 'asset_' + now + '_' + Math.random().toString(36).substring(2, 7);
-  const isVideo = Boolean(url.match(/\.(mp4|webm|mov|ogg)($|\?)/i));
-  const category: 'image' | 'video' = isVideo ? 'video' : 'image';
-
-  let parsedName = 'online-media.jpg';
+// 1. Direct File Upload to Cloud Firestore (Pure Firebase, zero local disk)
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    const urlObj = new URL(url);
-    const lastPart = urlObj.pathname.split('/').pop();
-    if (lastPart && lastPart.includes('.')) {
-      parsedName = decodeURIComponent(lastPart.split('?')[0]);
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file received' });
     }
-  } catch {}
 
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.get('host') || `localhost:${PORT}`;
-  const publicUrl = `${protocol}://${host}/api/public/${id}`;
+    const retention = (req.body.retention as string) || 'permanent';
+    const now = Date.now();
+    const expiresAt = computeExpiresAt(retention, now);
 
-  const newAsset: StoredAsset = {
-    id,
-    name: parsedName,
-    size: 1024 * 512,
-    type: isVideo ? 'video/mp4' : 'image/jpeg',
-    category,
-    filePath: '',
-    publicUrl: url, // Or direct URL
-    storageProvider: 'firebase-storage',
-    uploadedAt: now,
-    expiresAt,
-    retention,
-    isExpired: false,
-    downloadsCount: 0,
-  };
+    const safeBase = req.file.originalname.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+    const id = `asset_${now}_${Math.random().toString(36).substring(2, 7)}_${safeBase || 'item'}`;
+    const isVideo = req.file.mimetype.startsWith('video/');
+    const category: 'image' | 'video' = isVideo ? 'video' : 'image';
 
-  const current = loadAssets();
-  current.unshift(newAsset);
-  saveAssets(current);
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.get('host') || `localhost:${PORT}`;
+    const publicUrl = `${protocol}://${host}/api/public/${id}`;
 
-  return res.json({ success: true, asset: newAsset });
+    // Convert memory buffer to dataUrl for pure Firebase Firestore storage
+    const base64Data = req.file.buffer.toString('base64');
+    const dataUrl = `data:${req.file.mimetype};base64,${base64Data}`;
+
+    const newAsset = {
+      id,
+      name: req.file.originalname,
+      size: req.file.size,
+      type: req.file.mimetype,
+      category,
+      publicUrl,
+      storagePath: `firestore_assets/${id}`,
+      storageProvider: 'firestore-embedded',
+      uploadedAt: now,
+      expiresAt: expiresAt || 0,
+      retention,
+      isExpired: false,
+      dataUrl,
+    };
+
+    // Save directly into Cloud Firestore
+    await setDoc(doc(fbDb, 'assets', id), newAsset);
+    console.log(`[Firebase Firestore] Saved asset "${req.file.originalname}" to assets/${id}`);
+
+    // Return asset item to client (omitting raw dataUrl in response for speed)
+    const { dataUrl: _, ...clientAsset } = newAsset;
+    return res.json({ 
+      success: true, 
+      asset: {
+        ...clientAsset,
+        expiresAt,
+        downloadsCount: 0,
+        thumbnailUrl: publicUrl,
+      } 
+    });
+  } catch (err: any) {
+    console.error('Upload to Firestore failed:', err);
+    return res.status(500).json({ error: `Firebase save failed: ${err.message || 'Unknown error'}` });
+  }
 });
 
-// 3. Get Public Asset (UNIVERSAL DIRECT ACCESS FOR ANY BROWSER OR AI PIPELINE)
-app.get('/api/public/:id', (req, res) => {
-  cleanupExpired();
-  const { id } = req.params;
-  const assets = loadAssets();
-  const asset = assets.find((a) => a.id === id);
-
-  if (!asset) {
-    // Check if a file starts with this id in uploads folder
-    const files = fs.readdirSync(UPLOADS_DIR);
-    const matched = files.find((f) => f.startsWith(id));
-    if (matched) {
-      const fullPath = path.join(UPLOADS_DIR, matched);
-      const isVideo = matched.endsWith('.mp4') || matched.endsWith('.webm') || matched.endsWith('.mov');
-      res.setHeader('Content-Type', isVideo ? 'video/mp4' : 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      return res.sendFile(fullPath);
+// 2. Upload from URL (Saves to Firestore)
+app.post('/api/upload-url', async (req, res) => {
+  try {
+    const { url, retention = 'permanent' } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
     }
-    return res.status(404).send('File not found or expired');
-  }
 
-  // If this asset has a local file on disk, stream it
-  if (asset.filePath && fs.existsSync(asset.filePath)) {
-    res.setHeader('Content-Type', asset.type || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename="${asset.name}"`);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    return res.sendFile(asset.filePath);
-  }
+    const now = Date.now();
+    const expiresAt = computeExpiresAt(retention, now);
+    const id = `asset_${now}_${Math.random().toString(36).substring(2, 7)}`;
+    const isVideo = Boolean(url.match(/\.(mp4|webm|mov|ogg)($|\?)/i));
+    const category: 'image' | 'video' = isVideo ? 'video' : 'image';
 
-  // If it's a remote URL, redirect
-  if (asset.publicUrl && asset.publicUrl.startsWith('http')) {
-    return res.redirect(asset.publicUrl);
-  }
-
-  return res.status(404).send('File not found');
-});
-
-// 4. Get All Assets
-app.get('/api/files', (_req, res) => {
-  cleanupExpired();
-  const assets = loadAssets();
-  const now = Date.now();
-  const result = assets.map((a) => ({
-    ...a,
-    isExpired: a.expiresAt ? now > a.expiresAt : false,
-  }));
-  return res.json(result);
-});
-
-// 5. Delete Asset
-app.delete('/api/files/:id', (req, res) => {
-  const { id } = req.params;
-  const assets = loadAssets();
-  const asset = assets.find((a) => a.id === id);
-
-  if (asset && asset.filePath && fs.existsSync(asset.filePath)) {
+    let parsedName = 'online-media.jpg';
     try {
-      fs.unlinkSync(asset.filePath);
+      const urlObj = new URL(url);
+      const lastPart = urlObj.pathname.split('/').pop();
+      if (lastPart && lastPart.includes('.')) {
+        parsedName = decodeURIComponent(lastPart.split('?')[0]);
+      }
     } catch {}
-  }
 
-  const updated = assets.filter((a) => a.id !== id);
-  saveAssets(updated);
-  return res.json({ success: true });
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.get('host') || `localhost:${PORT}`;
+    const publicUrl = `${protocol}://${host}/api/public/${id}`;
+
+    const newAsset = {
+      id,
+      name: parsedName,
+      size: 1024 * 512,
+      type: isVideo ? 'video/mp4' : 'image/jpeg',
+      category,
+      publicUrl: url, // Direct URL
+      storagePath: `firestore_assets/${id}`,
+      storageProvider: 'firestore-embedded',
+      uploadedAt: now,
+      expiresAt: expiresAt || 0,
+      retention,
+      isExpired: false,
+      dataUrl: url,
+    };
+
+    await setDoc(doc(fbDb, 'assets', id), newAsset);
+
+    return res.json({ 
+      success: true, 
+      asset: {
+        ...newAsset,
+        expiresAt,
+        downloadsCount: 0,
+        thumbnailUrl: url,
+      } 
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'URL ingestion failed' });
+  }
 });
 
-// 6. Manual cleanup expired endpoint
-app.post('/api/cleanup', (_req, res) => {
-  const cleaned = cleanupExpired();
-  return res.json({ success: true, cleaned });
+// 3. Universal Public Access (Directly streamed from Cloud Firestore)
+app.get('/api/public/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const docSnap = await getDoc(doc(fbDb, 'assets', id));
+
+    if (!docSnap.exists()) {
+      return res.status(404).send('Asset not found or expired in Firebase');
+    }
+
+    const data = docSnap.data();
+    const now = Date.now();
+
+    // Check expiration
+    if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+      // Async purge
+      deleteDoc(doc(fbDb, 'assets', id)).catch(() => {});
+      return res.status(404).send('Asset expired according to retention policy');
+    }
+
+    // If document has base64 dataUrl, stream it directly as binary
+    if (data.dataUrl && data.dataUrl.startsWith('data:')) {
+      const match = data.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const mimeType = match[1];
+        const buffer = Buffer.from(match[2], 'base64');
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', `inline; filename="${data.name}"`);
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return res.end(buffer);
+      }
+    }
+
+    // If external publicUrl
+    if (data.publicUrl && data.publicUrl.startsWith('http') && !data.publicUrl.includes(`/api/public/${id}`)) {
+      return res.redirect(data.publicUrl);
+    }
+
+    return res.status(404).send('Media payload unavailable');
+  } catch (err: any) {
+    console.error('Error serving asset from Firestore:', err);
+    return res.status(500).send('Internal server error retrieving file from Firebase');
+  }
+});
+
+// 4. Get All Assets directly from Firestore
+app.get('/api/files', async (_req, res) => {
+  try {
+    const snapshot = await getDocs(collection(fbDb, 'assets'));
+    const now = Date.now();
+    const items = snapshot.docs.map((d) => {
+      const data = d.data();
+      const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
+      return {
+        id: data.id || d.id,
+        name: data.name,
+        size: data.size,
+        type: data.type,
+        category: data.category || (data.type?.startsWith('video/') ? 'video' : 'image'),
+        publicUrl: data.publicUrl,
+        storageKey: data.storagePath || `firestore_assets/${data.id}`,
+        storageProvider: data.storageProvider || 'firestore-embedded',
+        uploadedAt: Number(data.uploadedAt),
+        expiresAt,
+        retention: data.retention || (expiresAt ? '1day' : 'permanent'),
+        isExpired: expiresAt ? now > expiresAt : false,
+        downloadsCount: 0,
+        thumbnailUrl: data.publicUrl,
+      };
+    }).sort((a, b) => b.uploadedAt - a.uploadedAt);
+
+    return res.json(items);
+  } catch (err: any) {
+    console.error('Error reading assets from Firestore:', err);
+    return res.json([]);
+  }
+});
+
+// 5. Delete Asset directly from Firestore
+app.delete('/api/files/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await deleteDoc(doc(fbDb, 'assets', id));
+    console.log(`[Firebase Firestore] Deleted asset ${id}`);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete from Firebase' });
+  }
+});
+
+// 6. Manual cleanup endpoint
+app.post('/api/cleanup', async (_req, res) => {
+  try {
+    const snapshot = await getDocs(collection(fbDb, 'assets'));
+    const now = Date.now();
+    let cleaned = 0;
+    for (const d of snapshot.docs) {
+      const data = d.data();
+      if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+        await deleteDoc(doc(fbDb, 'assets', d.id));
+        cleaned++;
+      }
+    }
+    return res.json({ success: true, cleaned });
+  } catch {
+    return res.json({ success: true, cleaned: 0 });
+  }
 });
 
 // Start server with Vite middleware in dev or static files in production
@@ -311,7 +309,7 @@ async function bootstrap() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 AI Video Pipeline Vault Server running at http://0.0.0.0:${PORT}`);
+    console.log(`🚀 Firebase AI Vault Server running at http://0.0.0.0:${PORT}`);
   });
 }
 

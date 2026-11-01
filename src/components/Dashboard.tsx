@@ -155,14 +155,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
     if (!fileToDelete) return;
     const target = fileToDelete;
     setDeletingId(target.id);
+    setFileToDelete(null); // Dismiss modal immediately to prevent hanging
     try {
+      onRefresh(target.id); // Optimistically remove from UI
       await deleteAsset(target);
     } catch (err) {
       console.error('Delete error:', err);
     } finally {
       setDeletingId(null);
-      setFileToDelete(null);
-      onRefresh(target.id);
     }
   };
 

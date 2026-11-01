@@ -6,14 +6,7 @@ import {
   onSnapshot, 
   getDocs 
 } from 'firebase/firestore';
-import { 
-  ref, 
-  uploadBytesResumable, 
-  getDownloadURL, 
-  deleteObject, 
-  UploadTask 
-} from 'firebase/storage';
-import { db, storage, isFirebaseConfigured, ensureAuthUser } from './firebase';
+import { db, isFirebaseConfigured } from './firebase';
 import { UploadedFileItem, RetentionOption } from '../types';
 
 export function computeExpiryTimestamp(retention: RetentionOption, uploadTime: number): number | null {
@@ -39,56 +32,28 @@ export function sanitizeFileName(name: string): string {
   return `${clean || 'asset'}${ext || '.bin'}`;
 }
 
-// Active upload tracking to allow immediate mid-upload cancellation
+// Active upload tracking
 let activeXhr: XMLHttpRequest | null = null;
-let activeUploadTask: UploadTask | null = null;
-let activeUploadingAssetId: string | null = null;
-let activeUploadingStoragePath: string | null = null;
+let isCancelled = false;
 
-// Cancel in-progress upload and purge any partial data immediately
 export async function cancelCurrentUpload(): Promise<void> {
+  isCancelled = true;
   if (activeXhr) {
     try {
       activeXhr.abort();
     } catch {}
     activeXhr = null;
   }
-
-  if (activeUploadTask) {
-    try {
-      activeUploadTask.cancel();
-    } catch {}
-    activeUploadTask = null;
-  }
-
-  // Purge any partial storage object or firestore doc
-  if (activeUploadingStoragePath) {
-    try {
-      const storageRef = ref(storage, activeUploadingStoragePath);
-      await deleteObject(storageRef);
-    } catch {}
-    activeUploadingStoragePath = null;
-  }
-
-  if (activeUploadingAssetId) {
-    const idToPurge = activeUploadingAssetId;
-    activeUploadingAssetId = null;
-    try {
-      await deleteDoc(doc(db, 'assets', idToPurge));
-    } catch {}
-    try {
-      await fetch(`/api/files/${idToPurge}`, { method: 'DELETE' });
-    } catch {}
-  }
 }
 
-// Ultra-fast instant upload (<1s) with Firebase Firestore synchronization
+// Upload a single asset to Firebase Firestore
 export async function uploadAsset(
   file: File | Blob,
   fileName: string,
   retention: RetentionOption,
   onProgress?: (pct: number) => void
 ): Promise<UploadedFileItem> {
+  isCancelled = false;
   const isVideo = file.type.startsWith('video/');
   const category = isVideo ? 'video' : 'image';
   const cleanName = sanitizeFileName(fileName);
@@ -97,7 +62,6 @@ export async function uploadAsset(
 
   if (onProgress) onProgress(15);
 
-  // Step 1: Upload via same-origin backend API (takes ~150-300ms for images/videos)
   const formData = new FormData();
   formData.append('file', file, cleanName);
   formData.append('retention', retention);
@@ -108,8 +72,7 @@ export async function uploadAsset(
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
-        // Map upload progress from 15% to 80%
-        const percent = Math.min(80, Math.round((event.loaded / event.total) * 65) + 15);
+        const percent = Math.min(85, Math.round((event.loaded / event.total) * 70) + 15);
         if (onProgress) onProgress(percent);
       }
     };
@@ -122,19 +85,24 @@ export async function uploadAsset(
           if (res.success && res.asset) {
             resolve(res.asset);
           } else {
-            reject(new Error(res.error || 'Server rejected the file upload'));
+            reject(new Error(res.error || 'Firebase save rejected'));
           }
         } catch {
-          reject(new Error('Invalid response from upload server'));
+          reject(new Error('Invalid response from Firebase server'));
         }
       } else {
-        reject(new Error(`Server error: HTTP ${xhr.status}`));
+        try {
+          const errRes = JSON.parse(xhr.responseText);
+          reject(new Error(errRes.error || `Server error: HTTP ${xhr.status}`));
+        } catch {
+          reject(new Error(`Server error: HTTP ${xhr.status}`));
+        }
       }
     };
 
     xhr.onerror = () => {
       activeXhr = null;
-      reject(new Error('Network error during file upload. Please check your connection.'));
+      reject(new Error('Network error during file upload. Check your connection.'));
     };
 
     xhr.onabort = () => {
@@ -146,71 +114,29 @@ export async function uploadAsset(
     xhr.send(formData);
   });
 
-  const assetId = serverAsset.id;
-  activeUploadingAssetId = assetId;
-
-  if (onProgress) onProgress(85);
-
-  let finalPublicUrl = serverAsset.publicUrl;
-  let finalStorageKey = serverAsset.filePath || `uploads/${serverAsset.id}`;
-
-  // Step 2: Attempt Firebase Storage upload in background with a 2-second strict timeout (so CORS never hangs the user)
-  if (isFirebaseConfigured()) {
-    try {
-      await ensureAuthUser();
-      const storagePath = `pipeline_assets/${assetId}/${cleanName}`;
-      activeUploadingStoragePath = storagePath;
-      const storageRef = ref(storage, storagePath);
-
-      const fbStoragePromise = (async () => {
-        const uploadTask = uploadBytesResumable(storageRef, file, {
-          contentType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
-          customMetadata: {
-            retention,
-            expiresAt: expiresAt ? String(expiresAt) : 'permanent',
-            uploadedAt: String(now),
-          }
-        });
-        activeUploadTask = uploadTask;
-        await uploadTask;
-        activeUploadTask = null;
-        return await getDownloadURL(storageRef);
-      })();
-
-      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500));
-      const fbUrl = await Promise.race([fbStoragePromise, timeoutPromise]);
-      if (fbUrl) {
-        finalPublicUrl = fbUrl;
-        finalStorageKey = storagePath;
-      }
-    } catch (fbErr) {
-      console.warn('Firebase Storage upload notice (using universal vault link):', fbErr);
-    }
-  }
-
-  if (onProgress) onProgress(95);
+  if (onProgress) onProgress(90);
 
   const assetItem: UploadedFileItem = {
-    id: assetId,
+    id: serverAsset.id,
     name: fileName,
     size: file.size,
     type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
     category,
-    publicUrl: finalPublicUrl,
-    storageKey: finalStorageKey,
-    storageProvider: 'firebase-storage',
+    publicUrl: serverAsset.publicUrl,
+    storageKey: serverAsset.storagePath || `firestore_assets/${serverAsset.id}`,
+    storageProvider: 'firestore-embedded',
     uploadedAt: now,
     expiresAt,
     retention,
     isExpired: false,
     downloadsCount: 0,
-    thumbnailUrl: finalPublicUrl,
+    thumbnailUrl: serverAsset.publicUrl,
   };
 
-  // Step 3: Persist document in Firestore database (if configured) with timeout protection
+  // Double check client-side Firestore synchronization
   if (isFirebaseConfigured()) {
     try {
-      const firestorePromise = setDoc(doc(db, 'assets', assetId), {
+      await setDoc(doc(db, 'assets', assetItem.id), {
         id: assetItem.id,
         name: assetItem.name,
         size: assetItem.size,
@@ -218,27 +144,56 @@ export async function uploadAsset(
         category: assetItem.category,
         publicUrl: assetItem.publicUrl,
         storagePath: assetItem.storageKey,
-        storageProvider: 'firebase-storage',
+        storageProvider: 'firestore-embedded',
         uploadedAt: assetItem.uploadedAt,
         expiresAt: assetItem.expiresAt || 0,
         retention: assetItem.retention,
         isExpired: false,
       });
-      const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 2000));
-      await Promise.race([firestorePromise, timeoutPromise]);
     } catch (fsErr) {
-      console.warn('Firestore metadata sync notice:', fsErr);
+      console.warn('Client-side Firestore sync notice (server already saved):', fsErr);
     }
   }
 
-  // Clear active upload tracking
-  activeUploadingAssetId = null;
-  activeUploadingStoragePath = null;
-  activeXhr = null;
-  activeUploadTask = null;
-
   if (onProgress) onProgress(100);
   return assetItem;
+}
+
+// Bulk Upload: Handles 10, 20, 30+ files sequentially/in batches with progress
+export async function uploadMultipleAssets(
+  files: File[],
+  retention: RetentionOption,
+  onBatchProgress?: (completed: number, total: number, currentFileName: string, filePercent: number) => void
+): Promise<UploadedFileItem[]> {
+  const results: UploadedFileItem[] = [];
+  isCancelled = false;
+
+  for (let i = 0; i < files.length; i++) {
+    if (isCancelled) break;
+    const file = files[i];
+
+    if (onBatchProgress) {
+      onBatchProgress(i, files.length, file.name, 10);
+    }
+
+    try {
+      const item = await uploadAsset(file, file.name, retention, (filePct) => {
+        if (onBatchProgress) {
+          onBatchProgress(i, files.length, file.name, filePct);
+        }
+      });
+      results.push(item);
+    } catch (err: any) {
+      console.error(`Failed to upload ${file.name}:`, err);
+      // We continue with other files so one broken file doesn't block the other 29 files
+    }
+
+    if (onBatchProgress) {
+      onBatchProgress(i + 1, files.length, file.name, 100);
+    }
+  }
+
+  return results;
 }
 
 // Upload from web URL (Online image/video link pasted by user)
@@ -256,12 +211,13 @@ export async function uploadAssetFromUrl(
   });
 
   if (!res.ok) {
-    throw new Error('Failed to process URL on server');
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || 'Failed to process URL into Firebase');
   }
 
   const data = await res.json();
   const serverAsset = data.asset;
-  if (onProgress) onProgress(70);
+  if (onProgress) onProgress(80);
 
   const assetItem: UploadedFileItem = {
     id: serverAsset.id,
@@ -270,8 +226,8 @@ export async function uploadAssetFromUrl(
     type: serverAsset.type || 'image/jpeg',
     category: serverAsset.category || 'image',
     publicUrl: serverAsset.publicUrl,
-    storageKey: serverAsset.filePath || serverAsset.id,
-    storageProvider: 'firebase-storage',
+    storageKey: serverAsset.storagePath || `firestore_assets/${serverAsset.id}`,
+    storageProvider: 'firestore-embedded',
     uploadedAt: serverAsset.uploadedAt,
     expiresAt: serverAsset.expiresAt,
     retention: serverAsset.retention || retention,
@@ -280,34 +236,11 @@ export async function uploadAssetFromUrl(
     thumbnailUrl: serverAsset.publicUrl,
   };
 
-  // Sync to Firestore if available
-  if (isFirebaseConfigured()) {
-    try {
-      await Promise.race([
-        setDoc(doc(db, 'assets', assetItem.id), {
-          id: assetItem.id,
-          name: assetItem.name,
-          size: assetItem.size,
-          type: assetItem.type,
-          category: assetItem.category,
-          publicUrl: assetItem.publicUrl,
-          storagePath: assetItem.storageKey,
-          storageProvider: 'firebase-storage',
-          uploadedAt: assetItem.uploadedAt,
-          expiresAt: assetItem.expiresAt || 0,
-          retention: assetItem.retention,
-          isExpired: false,
-        }),
-        new Promise<void>((r) => setTimeout(r, 2000))
-      ]);
-    } catch {}
-  }
-
   if (onProgress) onProgress(100);
   return assetItem;
 }
 
-// Real-time listener for Firestore collection "assets" with local server sync
+// Real-time listener for Firestore collection "assets"
 export function subscribeToAssets(
   onUpdate: (items: UploadedFileItem[]) => void
 ): () => void {
@@ -316,9 +249,7 @@ export function subscribeToAssets(
 
   const emitMerged = () => {
     const map = new Map<string, UploadedFileItem>();
-    // Add server items first
     serverItems.forEach(item => map.set(item.id, item));
-    // Firestore items take priority if present
     firestoreItems.forEach(item => map.set(item.id, item));
     const merged = Array.from(map.values()).sort((a, b) => b.uploadedAt - a.uploadedAt);
     onUpdate(merged);
@@ -330,7 +261,6 @@ export function subscribeToAssets(
     .then((files: any[]) => {
       serverItems = files.map(f => ({
         ...f,
-        storageKey: f.filePath || f.id,
         thumbnailUrl: f.publicUrl,
       }));
       emitMerged();
@@ -358,8 +288,8 @@ export function subscribeToAssets(
           type: data.type,
           category: data.category || (data.type?.startsWith('video/') ? 'video' : 'image'),
           publicUrl: data.publicUrl,
-          storageKey: data.storagePath || `pipeline_assets/${data.id}/${data.name}`,
-          storageProvider: 'firebase-storage',
+          storageKey: data.storagePath || `firestore_assets/${data.id}`,
+          storageProvider: 'firestore-embedded',
           uploadedAt: Number(data.uploadedAt),
           expiresAt,
           retention: data.retention || (expiresAt ? '1day' : 'permanent'),
@@ -379,74 +309,54 @@ export function subscribeToAssets(
   return unsubscribe;
 }
 
-// Delete asset with safety timeout so it NEVER gets stuck on "Deleting..."
+// Delete asset fast without UI freezing
 export async function deleteAsset(item: UploadedFileItem): Promise<boolean> {
   const deletePromise = (async () => {
-    // 1. Delete from Firebase Storage
-    if (isFirebaseConfigured() && item.storageKey && !item.storageKey.startsWith('http')) {
-      try {
-        const storageRef = ref(storage, item.storageKey);
-        await deleteObject(storageRef);
-      } catch {}
-    }
-
-    // 2. Delete from Firebase Firestore
+    // 1. Delete from Firebase Firestore
     if (isFirebaseConfigured()) {
       try {
         await deleteDoc(doc(db, 'assets', item.id));
-      } catch {}
+      } catch (e) {
+        console.warn('Direct Firestore delete error:', e);
+      }
     }
 
-    // 3. Delete from backend file system if it existed on disk
+    // 2. Delete via backend API
     try {
       await fetch(`/api/files/${item.id}`, { method: 'DELETE' });
     } catch {}
   })();
 
-  // 2.5 second timeout to guarantee UI never freezes
-  const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 2500));
+  const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 1500));
   await Promise.race([deletePromise, timeoutPromise]);
-
   return true;
 }
 
-// Automated cleanup of expired files in Firebase Storage and Firestore
+// Automated cleanup of expired files in Firestore
 export async function runAutomatedCleanup(): Promise<number> {
-  if (!isFirebaseConfigured()) {
-    try {
-      const res = await fetch('/api/cleanup', { method: 'POST' });
-      const data = await res.json();
-      return data.cleaned || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  let count = 0;
-  const now = Date.now();
-
   try {
-    const assetsCol = collection(db, 'assets');
-    const snapshot = await getDocs(assetsCol);
-
-    for (const docSnap of snapshot.docs) {
-      const data = docSnap.data();
-      const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
-      if (expiresAt && now > expiresAt) {
-        if (data.storagePath && !data.storagePath.startsWith('http')) {
+    const res = await fetch('/api/cleanup', { method: 'POST' });
+    const data = await res.json();
+    return data.cleaned || 0;
+  } catch {
+    // Fallback client-side cleanup
+    if (!isFirebaseConfigured()) return 0;
+    let count = 0;
+    const now = Date.now();
+    try {
+      const assetsCol = collection(db, 'assets');
+      const snapshot = await getDocs(assetsCol);
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
+        if (expiresAt && now > expiresAt) {
           try {
-            const storageRef = ref(storage, data.storagePath);
-            await deleteObject(storageRef);
+            await deleteDoc(doc(db, 'assets', docSnap.id));
+            count++;
           } catch {}
         }
-
-        try {
-          await deleteDoc(doc(db, 'assets', docSnap.id));
-          count++;
-        } catch {}
       }
-    }
-  } catch {}
-
-  return count;
+    } catch {}
+    return count;
+  }
 }

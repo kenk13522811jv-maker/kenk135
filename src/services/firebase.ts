@@ -16,6 +16,16 @@ export interface FirebaseConfigType {
   measurementId?: string;
 }
 
+export const DEFAULT_FIREBASE_CONFIG: FirebaseConfigType = {
+  projectId: "gen-lang-client-0536368169",
+  appId: "1:324552210220:web:b11d8cc1636bcad38f5e89",
+  apiKey: "AIzaSyAQ5V8D9oSjRiNSDppXHPN-NqXm0lnEE0Y",
+  authDomain: "gen-lang-client-0536368169.firebaseapp.com",
+  firestoreDatabaseId: "ai-studio-cloudflarer2file-8229099a-1e66-456d-b761-d252780131eb",
+  storageBucket: "gen-lang-client-0536368169.firebasestorage.app",
+  messagingSenderId: "324552210220",
+};
+
 // Safely probe if local dev config exists without hardcoding or breaking git builds
 let localDevConfig: Partial<FirebaseConfigType> = {};
 try {
@@ -37,9 +47,9 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
       projectId: envProjectId,
       storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || `${envProjectId}.firebasestorage.app`,
       authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || `${envProjectId}.firebaseapp.com`,
-      appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
-      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-      firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID,
+      appId: import.meta.env.VITE_FIREBASE_APP_ID || DEFAULT_FIREBASE_CONFIG.appId,
+      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || DEFAULT_FIREBASE_CONFIG.messagingSenderId,
+      firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID || DEFAULT_FIREBASE_CONFIG.firestoreDatabaseId,
     };
   }
 
@@ -49,7 +59,11 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
     if (custom) {
       const parsed = JSON.parse(custom);
       if (parsed.apiKey && parsed.projectId) {
-        return parsed;
+        return {
+          ...DEFAULT_FIREBASE_CONFIG,
+          ...parsed,
+          firestoreDatabaseId: parsed.firestoreDatabaseId || DEFAULT_FIREBASE_CONFIG.firestoreDatabaseId,
+        };
       }
     }
   } catch (e) {
@@ -58,18 +72,15 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
 
   // 3. Local dev config (for AI Studio preview, excluded from Git via .gitignore)
   if (localDevConfig.apiKey && localDevConfig.projectId) {
-    return localDevConfig as FirebaseConfigType;
+    return {
+      ...DEFAULT_FIREBASE_CONFIG,
+      ...localDevConfig,
+      firestoreDatabaseId: localDevConfig.firestoreDatabaseId || DEFAULT_FIREBASE_CONFIG.firestoreDatabaseId,
+    } as FirebaseConfigType;
   }
 
-  // 4. Empty placeholder
-  return {
-    projectId: '',
-    appId: '',
-    apiKey: '',
-    authDomain: '',
-    storageBucket: '',
-    messagingSenderId: '',
-  };
+  // 4. Default project config (guarantees seamless operation on Render and cloud)
+  return DEFAULT_FIREBASE_CONFIG;
 }
 
 export function isFirebaseConfigured(): boolean {

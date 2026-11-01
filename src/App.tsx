@@ -53,9 +53,10 @@ export default function App() {
     setLang((prev) => (prev === 'bn' ? 'en' : 'bn'));
   };
 
-  const handleUploadSuccess = (item: UploadedFileItem) => {
-    // Immediately display newly uploaded asset in dashboard without waiting
-    setFiles((prev) => [item, ...prev.filter((f) => f.id !== item.id)]);
+  const handleUploadSuccess = (itemOrItems: UploadedFileItem | UploadedFileItem[]) => {
+    const newItems = Array.isArray(itemOrItems) ? itemOrItems : [itemOrItems];
+    const newIds = new Set(newItems.map((i) => i.id));
+    setFiles((prev) => [...newItems, ...prev.filter((f) => !newIds.has(f.id))]);
   };
 
   // Seed sample demonstration pipeline items if user wants quick testing

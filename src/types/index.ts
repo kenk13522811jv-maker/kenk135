@@ -18,13 +18,14 @@ export interface UploadedFileItem {
   category: 'image' | 'video';
   publicUrl: string;
   storageKey: string;
-  storageProvider: 'firebase-storage' | 'cloudflare-r2' | 'sandbox-local';
+  storageProvider: 'firebase-storage' | 'firestore-embedded' | 'cloudflare-r2' | 'sandbox-local';
   uploadedAt: number; // timestamp
   expiresAt: number | null; // timestamp or null for permanent
   retention: RetentionOption;
   isExpired?: boolean;
   thumbnailUrl?: string;
   downloadsCount: number;
+  dataUrl?: string;
 }
 
 export type Language = 'bn' | 'en';

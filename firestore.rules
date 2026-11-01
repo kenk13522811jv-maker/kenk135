@@ -12,15 +12,13 @@ service cloud.firestore {
 
     function isValidAsset(data) {
       return data.keys().hasAll(['id', 'name', 'size', 'type', 'category', 'publicUrl', 'storagePath', 'storageProvider', 'uploadedAt', 'retention']) &&
-             data.keys().hasOnly(['id', 'name', 'size', 'type', 'category', 'publicUrl', 'storagePath', 'storageProvider', 'uploadedAt', 'expiresAt', 'retention', 'isExpired']) &&
              data.id is string && isValidId(data.id) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 255 &&
              data.size is number && data.size >= 0 &&
              data.type is string && data.type.size() <= 100 &&
              data.category in ['image', 'video'] &&
-             data.publicUrl is string && data.publicUrl.size() <= 2048 &&
              data.storagePath is string && data.storagePath.size() <= 512 &&
-             data.storageProvider in ['firebase-storage', 'cloudflare-r2', 'sandbox-local'] &&
+             data.storageProvider in ['firebase-storage', 'firestore-embedded', 'cloudflare-r2', 'sandbox-local'] &&
              data.uploadedAt is number &&
              data.retention in ['permanent', '1day', '2days', '3days'];
     }
