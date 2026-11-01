@@ -53,8 +53,9 @@ export default function App() {
     setLang((prev) => (prev === 'bn' ? 'en' : 'bn'));
   };
 
-  const handleUploadSuccess = (_item: UploadedFileItem) => {
-    // Firestore listener automatically receives and updates the files list!
+  const handleUploadSuccess = (item: UploadedFileItem) => {
+    // Immediately display newly uploaded asset in dashboard without waiting
+    setFiles((prev) => [item, ...prev.filter((f) => f.id !== item.id)]);
   };
 
   // Seed sample demonstration pipeline items if user wants quick testing
