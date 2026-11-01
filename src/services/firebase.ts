@@ -2,7 +2,6 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, User } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import defaultConfig from '../../firebase-applet-config.json';
 
 const CUSTOM_FIREBASE_CONFIG_KEY = 'custom_firebase_config_v1';
 
@@ -17,10 +16,22 @@ export interface FirebaseConfigType {
   measurementId?: string;
 }
 
+// Safely probe if local dev config exists without hardcoding or breaking git builds
+let localDevConfig: Partial<FirebaseConfigType> = {};
+try {
+  const glob = import.meta.glob('/firebase-applet-config.json', { eager: true });
+  const key = Object.keys(glob)[0];
+  if (key && glob[key]) {
+    localDevConfig = (glob[key] as any).default || glob[key];
+  }
+} catch {}
+
 export function getActiveFirebaseConfig(): FirebaseConfigType {
-  // 1. Check Vite Environment variables (Recommended for Render, Vercel, Netlify deployment)
+  // 1. PRIMARY: Vite Environment Variables (Render, Vercel, .env)
+  // This is the clean, secure method where no secrets are stored in the repo!
   const envApiKey = import.meta.env.VITE_FIREBASE_API_KEY;
   const envProjectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
+
   if (envApiKey && envProjectId) {
     return {
       apiKey: envApiKey,
@@ -33,7 +44,7 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
     };
   }
 
-  // 2. Check localStorage custom settings
+  // 2. Custom configuration saved in browser's local settings
   try {
     const custom = localStorage.getItem(CUSTOM_FIREBASE_CONFIG_KEY);
     if (custom) {
@@ -46,8 +57,20 @@ export function getActiveFirebaseConfig(): FirebaseConfigType {
     console.warn('Could not read custom firebase config from localStorage', e);
   }
 
-  // 3. Fallback to auto-provisioned configuration
-  return defaultConfig as FirebaseConfigType;
+  // 3. Local dev config (for AI Studio preview, excluded from Git via .gitignore)
+  if (localDevConfig.apiKey && localDevConfig.projectId) {
+    return localDevConfig as FirebaseConfigType;
+  }
+
+  // 4. Default clean empty placeholder
+  return {
+    projectId: '',
+    appId: '',
+    apiKey: '',
+    authDomain: '',
+    storageBucket: '',
+    messagingSenderId: '',
+  };
 }
 
 export function saveCustomFirebaseConfig(config: FirebaseConfigType): void {
@@ -60,9 +83,19 @@ export function resetToDefaultFirebaseConfig(): void {
 
 // Initialize Firebase App
 const activeConfig = getActiveFirebaseConfig();
-export const app = getApps().length === 0 ? initializeApp(activeConfig) : getApp();
+const hasCredentials = Boolean(activeConfig.apiKey && activeConfig.projectId);
 
-export const db = activeConfig.firestoreDatabaseId
+export const app = getApps().length === 0 
+  ? initializeApp(hasCredentials ? activeConfig : {
+      apiKey: "dummy-key-for-init",
+      projectId: "dummy-project",
+      appId: "1:000:web:000",
+      authDomain: "dummy.firebaseapp.com",
+      storageBucket: "dummy.appspot.com",
+    }) 
+  : getApp();
+
+export const db = (hasCredentials && activeConfig.firestoreDatabaseId)
   ? getFirestore(app, activeConfig.firestoreDatabaseId)
   : getFirestore(app);
 
@@ -72,13 +105,13 @@ export const storage = getStorage(app);
 // Anonymous sign in helper
 let currentUser: User | null = null;
 export async function ensureAuthUser(): Promise<User | null> {
+  if (!hasCredentials) return null;
   if (currentUser) return currentUser;
   try {
     const cred = await signInAnonymously(auth);
     currentUser = cred.user;
     return currentUser;
   } catch (err) {
-    console.warn('Anonymous sign-in not available; continuing in public mode', err);
     return null;
   }
 }
@@ -89,13 +122,11 @@ onAuthStateChanged(auth, (user) => {
 
 // Test connection
 export async function testFirestoreConnection(): Promise<boolean> {
+  if (!hasCredentials) return false;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn("Please check your Firebase configuration or network connectivity.");
-    }
+  } catch {
     return false;
   }
 }
