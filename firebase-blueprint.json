@@ -1,0 +1,74 @@
+{
+  "entities": {
+    "Asset": {
+      "title": "Asset",
+      "description": "Uploaded image or video asset for AI video pipeline with retention policy",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique asset identifier",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "description": "Original file name",
+          "maxLength": 255
+        },
+        "size": {
+          "type": "number",
+          "description": "File size in bytes"
+        },
+        "type": {
+          "type": "string",
+          "description": "MIME type of the media asset",
+          "maxLength": 100
+        },
+        "category": {
+          "type": "string",
+          "description": "Category of the asset",
+          "enum": ["image", "video"]
+        },
+        "publicUrl": {
+          "type": "string",
+          "description": "Public download URL from Firebase Storage",
+          "maxLength": 2048
+        },
+        "storagePath": {
+          "type": "string",
+          "description": "Full path inside Firebase Storage bucket",
+          "maxLength": 512
+        },
+        "storageProvider": {
+          "type": "string",
+          "description": "Backend storage provider",
+          "enum": ["firebase-storage", "cloudflare-r2", "sandbox-local"]
+        },
+        "uploadedAt": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds of upload"
+        },
+        "expiresAt": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds when the file expires, or 0 if permanent"
+        },
+        "retention": {
+          "type": "string",
+          "description": "Retention policy identifier",
+          "enum": ["permanent", "1day", "2days", "3days"]
+        },
+        "isExpired": {
+          "type": "boolean",
+          "description": "Whether the asset has expired and marked for deletion"
+        }
+      },
+      "required": ["id", "name", "size", "type", "category", "publicUrl", "storagePath", "storageProvider", "uploadedAt", "retention"]
+    }
+  },
+  "firestore": {
+    "/assets/{assetId}": {
+      "schema": "Asset",
+      "description": "Collection of uploaded video pipeline assets and their retention metadata"
+    }
+  }
+}

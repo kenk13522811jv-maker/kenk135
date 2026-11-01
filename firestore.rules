@@ -1,0 +1,35 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidAsset(data) {
+      return data.keys().hasAll(['id', 'name', 'size', 'type', 'category', 'publicUrl', 'storagePath', 'storageProvider', 'uploadedAt', 'retention']) &&
+             data.keys().hasOnly(['id', 'name', 'size', 'type', 'category', 'publicUrl', 'storagePath', 'storageProvider', 'uploadedAt', 'expiresAt', 'retention', 'isExpired']) &&
+             data.id is string && isValidId(data.id) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 255 &&
+             data.size is number && data.size >= 0 &&
+             data.type is string && data.type.size() <= 100 &&
+             data.category in ['image', 'video'] &&
+             data.publicUrl is string && data.publicUrl.size() <= 2048 &&
+             data.storagePath is string && data.storagePath.size() <= 512 &&
+             data.storageProvider in ['firebase-storage', 'cloudflare-r2', 'sandbox-local'] &&
+             data.uploadedAt is number &&
+             data.retention in ['permanent', '1day', '2days', '3days'];
+    }
+
+    match /assets/{assetId} {
+      allow read: if true;
+      allow create: if isValidId(assetId) && isValidAsset(request.resource.data);
+      allow update: if isValidId(assetId) && isValidAsset(request.resource.data);
+      allow delete: if isValidId(assetId);
+    }
+  }
+}

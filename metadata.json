@@ -1,0 +1,6 @@
+{
+  "name": "Cloudflare R2 File Vault & DropZone",
+  "description": "Upload images and videos with Cloudflare R2 storage, public shareable links, auto-expiration (1-3 days or permanent), management dashboard, and Python (Flask & Streamlit) backend code generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
