@@ -133,28 +133,6 @@ export async function uploadAsset(
     thumbnailUrl: serverAsset.publicUrl,
   };
 
-  // Double check client-side Firestore synchronization
-  if (isFirebaseConfigured()) {
-    try {
-      await setDoc(doc(db, 'assets', assetItem.id), {
-        id: assetItem.id,
-        name: assetItem.name,
-        size: assetItem.size,
-        type: assetItem.type,
-        category: assetItem.category,
-        publicUrl: assetItem.publicUrl,
-        storagePath: assetItem.storageKey,
-        storageProvider: 'firestore-embedded',
-        uploadedAt: assetItem.uploadedAt,
-        expiresAt: assetItem.expiresAt || 0,
-        retention: assetItem.retention,
-        isExpired: false,
-      });
-    } catch (fsErr) {
-      console.warn('Client-side Firestore sync notice (server already saved):', fsErr);
-    }
-  }
-
   if (onProgress) onProgress(100);
   return assetItem;
 }

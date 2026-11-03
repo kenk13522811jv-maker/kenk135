@@ -28,6 +28,11 @@ service cloud.firestore {
       allow create: if isValidId(assetId) && isValidAsset(request.resource.data);
       allow update: if isValidId(assetId) && isValidAsset(request.resource.data);
       allow delete: if isValidId(assetId);
+
+      match /chunks/{chunkId} {
+        allow read: if true;
+        allow write: if isValidId(assetId) && isValidId(chunkId);
+      }
     }
   }
 }

@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { StatsBar } from './components/StatsBar';
 import { UploadZone } from './components/UploadZone';
 import { Dashboard } from './components/Dashboard';
+import { VideoTemplateGenerator } from './components/VideoTemplateGenerator';
 import { MediaPreviewModal } from './components/MediaPreviewModal';
 import { FirebaseSettingsModal } from './components/FirebaseSettingsModal';
 import { PythonExportModal } from './components/PythonExportModal';
@@ -10,12 +11,12 @@ import { Language, UploadedFileItem } from './types';
 import { subscribeToAssets, runAutomatedCleanup, uploadAsset } from './services/assetService';
 import { getActiveFirebaseConfig, testFirestoreConnection } from './services/firebase';
 import { translations } from './services/translations';
-import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2, Clapperboard } from 'lucide-react';
 
 export default function App() {
   const [lang, setLang] = useState<Language>('bn');
   const [files, setFiles] = useState<UploadedFileItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'template'>('upload');
   const [isConnected, setIsConnected] = useState<boolean>(true);
 
   // Modals
@@ -121,6 +122,8 @@ export default function App() {
         onToggleLang={handleToggleLang}
         onOpenFirebaseSettings={() => setIsFirebaseSettingsOpen(true)}
         onOpenPython={() => setIsPythonOpen(true)}
+        onOpenTemplate={() => setActiveTab('template')}
+        activeTab={activeTab}
       />
 
       {/* Main Container */}
@@ -184,7 +187,7 @@ export default function App() {
           <div className="inline-flex p-1 rounded-2xl bg-slate-900 border border-slate-800 shadow-inner">
             <button
               onClick={() => setActiveTab('upload')}
-              className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
                 activeTab === 'upload'
                   ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/25'
                   : 'text-slate-400 hover:text-slate-200'
@@ -196,7 +199,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('dashboard')}
-              className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
                 activeTab === 'dashboard'
                   ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/25'
                   : 'text-slate-400 hover:text-slate-200'
@@ -210,14 +213,31 @@ export default function App() {
                 {files.length}
               </span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('template')}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                activeTab === 'template'
+                  ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/25'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Clapperboard className="w-4 h-4" />
+              <span>{t.templateTab}</span>
+              <span className={`text-[10px] uppercase font-bold px-1.5 py-0.2 rounded-full ${
+                activeTab === 'template' ? 'bg-slate-950/40 text-slate-950' : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+              }`}>
+                AI
+              </span>
+            </button>
           </div>
         </div>
 
         {/* Stats Overview */}
-        <StatsBar files={files} lang={lang} />
+        {activeTab !== 'template' && <StatsBar files={files} lang={lang} />}
 
         {/* Tab Content */}
-        {activeTab === 'upload' ? (
+        {activeTab === 'upload' && (
           <div className="space-y-8 animate-in fade-in duration-200">
             <UploadZone
               lang={lang}
@@ -253,7 +273,9 @@ export default function App() {
               </div>
             )}
           </div>
-        ) : (
+        )}
+
+        {activeTab === 'dashboard' && (
           <div className="animate-in fade-in duration-200">
             <Dashboard
               files={files}
@@ -264,6 +286,12 @@ export default function App() {
               }}
               onPreview={(f) => setPreviewFile(f)}
             />
+          </div>
+        )}
+
+        {activeTab === 'template' && (
+          <div className="animate-in fade-in duration-200">
+            <VideoTemplateGenerator lang={lang} />
           </div>
         )}
       </main>

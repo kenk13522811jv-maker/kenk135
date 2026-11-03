@@ -1,5 +1,5 @@
 import React from 'react';
-import { Flame, Settings, Code, Globe2, ShieldCheck, Database } from 'lucide-react';
+import { Flame, Settings, Code, Globe2, ShieldCheck, Database, Clapperboard } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../services/translations';
 import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
@@ -9,6 +9,8 @@ interface NavbarProps {
   onToggleLang: () => void;
   onOpenFirebaseSettings: () => void;
   onOpenPython: () => void;
+  onOpenTemplate?: () => void;
+  activeTab?: string;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -16,6 +18,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleLang,
   onOpenFirebaseSettings,
   onOpenPython,
+  onOpenTemplate,
+  activeTab,
 }) => {
   const t = translations[lang];
   const fbConfig = getActiveFirebaseConfig();
@@ -72,6 +76,21 @@ export const Navbar: React.FC<NavbarProps> = ({
             <Settings className="w-3.5 h-3.5 text-amber-400" />
             <span className="hidden sm:inline">{lang === 'bn' ? 'Firebase কনফিগ' : 'Firebase Config'}</span>
           </button>
+
+          {/* Video Template Trigger */}
+          {onOpenTemplate && (
+            <button
+              onClick={onOpenTemplate}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                activeTab === 'template'
+                  ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-500/20'
+                  : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border-slate-700 hover:border-amber-500/40'
+              }`}
+            >
+              <Clapperboard className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'টেমপ্লেট' : 'Template'}</span>
+            </button>
+          )}
 
           {/* Python Code Modal Trigger */}
           <button

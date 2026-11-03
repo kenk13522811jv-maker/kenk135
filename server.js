@@ -51,6 +51,15 @@ function computeExpiresAt(retention, now) {
   if (retention === "3days") return now + 3 * ONE_DAY;
   return null;
 }
+var mediaMemoryCache = /* @__PURE__ */ new Map();
+function pruneMemoryCache() {
+  if (mediaMemoryCache.size > 150) {
+    const keys = Array.from(mediaMemoryCache.keys());
+    for (let i = 0; i < 30; i++) {
+      mediaMemoryCache.delete(keys[i]);
+    }
+  }
+}
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -66,8 +75,17 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
     const host = req.get("host") || `localhost:${PORT}`;
     const publicUrl = `${protocol}://${host}/api/public/${id}`;
+    mediaMemoryCache.set(id, {
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      name: req.file.originalname,
+      expiresAt: expiresAt || 0
+    });
+    pruneMemoryCache();
     const base64Data = req.file.buffer.toString("base64");
-    const dataUrl = `data:${req.file.mimetype};base64,${base64Data}`;
+    const CHUNK_SIZE = 4e5;
+    const needsChunking = base64Data.length > 6e5;
+    const chunksCount = needsChunking ? Math.ceil(base64Data.length / CHUNK_SIZE) : 0;
     const newAsset = {
       id,
       name: req.file.originalname,
@@ -81,16 +99,40 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       expiresAt: expiresAt || 0,
       retention,
       isExpired: false,
-      dataUrl
+      hasChunks: needsChunking,
+      chunksCount,
+      dataUrl: needsChunking ? "" : `data:${req.file.mimetype};base64,${base64Data}`
     };
+    if (needsChunking) {
+      const chunkWrites = [];
+      for (let i = 0; i < chunksCount; i++) {
+        const chunkData = base64Data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        chunkWrites.push(
+          setDoc(doc(fbDb, "assets", id, "chunks", `chunk_${i}`), {
+            chunkIndex: i,
+            data: chunkData
+          })
+        );
+      }
+      await Promise.all(chunkWrites);
+    }
     await setDoc(doc(fbDb, "assets", id), newAsset);
-    console.log(`[Firebase Firestore] Saved asset "${req.file.originalname}" to assets/${id}`);
-    const { dataUrl: _, ...clientAsset } = newAsset;
+    console.log(`[Firebase Firestore] Successfully saved asset "${req.file.originalname}" (${req.file.size} bytes) to assets/${id}${needsChunking ? ` with ${chunksCount} chunks` : ""}`);
     return res.json({
       success: true,
       asset: {
-        ...clientAsset,
+        id,
+        name: req.file.originalname,
+        size: req.file.size,
+        type: req.file.mimetype,
+        category,
+        publicUrl,
+        storageKey: `firestore_assets/${id}`,
+        storageProvider: "firestore-embedded",
+        uploadedAt: now,
         expiresAt,
+        retention,
+        isExpired: false,
         downloadsCount: 0,
         thumbnailUrl: publicUrl
       }
@@ -123,45 +165,143 @@ app.post("/api/upload-url", async (req, res) => {
     const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
     const host = req.get("host") || `localhost:${PORT}`;
     const publicUrl = `${protocol}://${host}/api/public/${id}`;
-    const newAsset = {
-      id,
-      name: parsedName,
-      size: 1024 * 512,
-      type: isVideo ? "video/mp4" : "image/jpeg",
-      category,
-      publicUrl: url,
-      // Direct URL
-      storagePath: `firestore_assets/${id}`,
-      storageProvider: "firestore-embedded",
-      uploadedAt: now,
-      expiresAt: expiresAt || 0,
-      retention,
-      isExpired: false,
-      dataUrl: url
-    };
-    await setDoc(doc(fbDb, "assets", id), newAsset);
+    let fetchedBuffer = null;
+    let fetchedMime = isVideo ? "video/mp4" : "image/jpeg";
+    let fetchedSize = 1024 * 512;
+    try {
+      const fetchRes = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } });
+      if (fetchRes.ok) {
+        const arrayBuf = await fetchRes.arrayBuffer();
+        fetchedBuffer = Buffer.from(arrayBuf);
+        fetchedSize = fetchedBuffer.length;
+        const cType = fetchRes.headers.get("content-type");
+        if (cType) fetchedMime = cType.split(";")[0];
+      }
+    } catch (fetchErr) {
+      console.warn("Could not download external URL buffer, saving URL reference:", fetchErr);
+    }
+    if (fetchedBuffer) {
+      mediaMemoryCache.set(id, {
+        buffer: fetchedBuffer,
+        mimeType: fetchedMime,
+        name: parsedName,
+        expiresAt: expiresAt || 0
+      });
+      pruneMemoryCache();
+      const base64Data = fetchedBuffer.toString("base64");
+      const CHUNK_SIZE = 4e5;
+      const needsChunking = base64Data.length > 6e5;
+      const chunksCount = needsChunking ? Math.ceil(base64Data.length / CHUNK_SIZE) : 0;
+      if (needsChunking) {
+        const chunkWrites = [];
+        for (let i = 0; i < chunksCount; i++) {
+          const chunkData = base64Data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          chunkWrites.push(
+            setDoc(doc(fbDb, "assets", id, "chunks", `chunk_${i}`), {
+              chunkIndex: i,
+              data: chunkData
+            })
+          );
+        }
+        await Promise.all(chunkWrites);
+      }
+      const newAsset = {
+        id,
+        name: parsedName,
+        size: fetchedSize,
+        type: fetchedMime,
+        category,
+        publicUrl,
+        storagePath: `firestore_assets/${id}`,
+        storageProvider: "firestore-embedded",
+        uploadedAt: now,
+        expiresAt: expiresAt || 0,
+        retention,
+        isExpired: false,
+        hasChunks: needsChunking,
+        chunksCount,
+        dataUrl: needsChunking ? "" : `data:${fetchedMime};base64,${base64Data}`
+      };
+      await setDoc(doc(fbDb, "assets", id), newAsset);
+    } else {
+      const newAsset = {
+        id,
+        name: parsedName,
+        size: fetchedSize,
+        type: fetchedMime,
+        category,
+        publicUrl: url,
+        storagePath: `firestore_assets/${id}`,
+        storageProvider: "firestore-embedded",
+        uploadedAt: now,
+        expiresAt: expiresAt || 0,
+        retention,
+        isExpired: false,
+        dataUrl: url,
+        hasChunks: false,
+        chunksCount: 0
+      };
+      await setDoc(doc(fbDb, "assets", id), newAsset);
+    }
     return res.json({
       success: true,
       asset: {
-        ...newAsset,
+        id,
+        name: parsedName,
+        size: fetchedSize,
+        type: fetchedMime,
+        category,
+        publicUrl,
+        storageKey: `firestore_assets/${id}`,
+        storageProvider: "firestore-embedded",
+        uploadedAt: now,
         expiresAt,
+        retention,
+        isExpired: false,
         downloadsCount: 0,
-        thumbnailUrl: url
+        thumbnailUrl: publicUrl
       }
     });
   } catch (err) {
     return res.status(500).json({ error: err.message || "URL ingestion failed" });
   }
 });
-app.get("/api/public/:id", async (req, res) => {
+app.all("/api/public/:id", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return res.status(405).send("Method Not Allowed");
+  }
   try {
     const { id } = req.params;
+    const now = Date.now();
+    const cached = mediaMemoryCache.get(id);
+    if (cached) {
+      if (cached.expiresAt > 0 && now > cached.expiresAt) {
+        mediaMemoryCache.delete(id);
+        deleteDoc(doc(fbDb, "assets", id)).catch(() => {
+        });
+        return res.status(404).send("Asset expired according to retention policy");
+      }
+      res.setHeader("Content-Type", cached.mimeType || "image/jpeg");
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(cached.name || "media")}"`);
+      res.setHeader("Content-Length", cached.buffer.length);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      if (req.method === "HEAD") {
+        return res.end();
+      }
+      return res.end(cached.buffer);
+    }
     const docSnap = await getDoc(doc(fbDb, "assets", id));
     if (!docSnap.exists()) {
       return res.status(404).send("Asset not found or expired in Firebase");
     }
     const data = docSnap.data();
-    const now = Date.now();
     if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
       deleteDoc(doc(fbDb, "assets", id)).catch(() => {
       });
@@ -172,16 +312,59 @@ app.get("/api/public/:id", async (req, res) => {
       if (match) {
         const mimeType = match[1];
         const buffer = Buffer.from(match[2], "base64");
+        mediaMemoryCache.set(id, {
+          buffer,
+          mimeType,
+          name: data.name || "file",
+          expiresAt: data.expiresAt || 0
+        });
+        pruneMemoryCache();
         res.setHeader("Content-Type", mimeType);
-        res.setHeader("Content-Disposition", `inline; filename="${data.name}"`);
+        res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(data.name || "media")}"`);
+        res.setHeader("Content-Length", buffer.length);
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        if (req.method === "HEAD") {
+          return res.end();
+        }
+        return res.end(buffer);
+      }
+    }
+    if (data.hasChunks && data.chunksCount > 0) {
+      const chunkPromises = [];
+      for (let i = 0; i < data.chunksCount; i++) {
+        chunkPromises.push(getDoc(doc(fbDb, "assets", id, "chunks", `chunk_${i}`)));
+      }
+      const chunkDocs = await Promise.all(chunkPromises);
+      let fullBase64 = "";
+      for (const cDoc of chunkDocs) {
+        if (cDoc.exists()) {
+          fullBase64 += cDoc.data()?.data || "";
+        }
+      }
+      if (fullBase64.length > 0) {
+        const buffer = Buffer.from(fullBase64, "base64");
+        const mimeType = data.type || "image/jpeg";
+        mediaMemoryCache.set(id, {
+          buffer,
+          mimeType,
+          name: data.name || "media",
+          expiresAt: data.expiresAt || 0
+        });
+        pruneMemoryCache();
+        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(data.name || "media")}"`);
+        res.setHeader("Content-Length", buffer.length);
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        if (req.method === "HEAD") {
+          return res.end();
+        }
         return res.end(buffer);
       }
     }
     if (data.publicUrl && data.publicUrl.startsWith("http") && !data.publicUrl.includes(`/api/public/${id}`)) {
       return res.redirect(data.publicUrl);
     }
-    return res.status(404).send("Media payload unavailable");
+    return res.status(404).send("Media payload unavailable or missing in Firebase");
   } catch (err) {
     console.error("Error serving asset from Firestore:", err);
     return res.status(500).send("Internal server error retrieving file from Firebase");
@@ -220,6 +403,19 @@ app.get("/api/files", async (_req, res) => {
 app.delete("/api/files/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    mediaMemoryCache.delete(id);
+    const docSnap = await getDoc(doc(fbDb, "assets", id));
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      if (data.hasChunks && data.chunksCount > 0) {
+        const chunkDeletes = [];
+        for (let i = 0; i < data.chunksCount; i++) {
+          chunkDeletes.push(deleteDoc(doc(fbDb, "assets", id, "chunks", `chunk_${i}`)).catch(() => {
+          }));
+        }
+        await Promise.all(chunkDeletes);
+      }
+    }
     await deleteDoc(doc(fbDb, "assets", id));
     console.log(`[Firebase Firestore] Deleted asset ${id}`);
     return res.json({ success: true });
