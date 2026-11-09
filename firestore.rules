@@ -24,9 +24,8 @@ service cloud.firestore {
     }
 
     function isValidNote(data) {
-      return data.keys().hasAll(['id', 'content', 'createdAt', 'retention']) &&
+      return data.keys().hasAll(['id', 'createdAt', 'retention']) &&
              data.id is string && isValidId(data.id) &&
-             data.content is string && data.content.size() <= 1048576 &&
              data.createdAt is number &&
              data.retention in ['permanent', '1day', '2days', '3days'];
     }
@@ -48,6 +47,11 @@ service cloud.firestore {
       allow create: if isValidId(noteId) && isValidNote(request.resource.data);
       allow update: if isValidId(noteId) && isValidNote(request.resource.data);
       allow delete: if isValidId(noteId);
+
+      match /chunks/{chunkId} {
+        allow read: if true;
+        allow write: if isValidId(noteId) && isValidId(chunkId);
+      }
     }
   }
 }

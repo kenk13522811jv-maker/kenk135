@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   FileText, 
   Save, 
@@ -18,7 +18,9 @@ import {
   Eye,
   Flame,
   ShieldCheck,
-  Bot
+  Bot,
+  FileUp,
+  UploadCloud
 } from 'lucide-react';
 import { Language, NoteItem, RetentionOption } from '../types';
 import { saveNote, fetchNotes, deleteNote } from '../services/noteService';
@@ -35,6 +37,11 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [recentlySaved, setRecentlySaved] = useState<NoteItem | null>(null);
+
+  // File upload & drag-drop state
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
 
   // Saved notes list
   const [notes, setNotes] = useState<NoteItem[]>([]);
@@ -58,6 +65,28 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
   // Text stats
   const wordCount = content.trim() ? content.trim().split(/\s+/).length : 0;
   const charCount = content.length;
+  const approxKb = (new Blob([content]).size / 1024).toFixed(1);
+
+  // Read .txt or document file
+  const handleFileSelect = (file: File) => {
+    if (!file) return;
+    setSaveError(null);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = (e.target?.result as string) || '';
+      setContent(text);
+      setUploadedFileName(`${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+      if (!title.trim()) {
+        const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_.-]/g, ' ');
+        setTitle(cleanName);
+      }
+    };
+    reader.onerror = () => {
+      setSaveError(lang === 'bn' ? 'ফাইলটি পড়তে সমস্যা হয়েছে।' : 'Failed to read file.');
+    };
+    reader.readAsText(file, 'utf-8');
+  };
 
   // Handle Save
   const handleSave = async () => {
@@ -70,12 +99,15 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
     setSaveError(null);
 
     try {
-      const saved = await saveNote(title, content, retention);
+      // Strip trailing empty newlines so preformatted reader has zero extra bottom space
+      const cleanContent = content.replace(/\s+$/, '');
+      const saved = await saveNote(title, cleanContent, retention);
       setRecentlySaved(saved);
       setNotes(prev => [saved, ...prev.filter(n => n.id !== saved.id)]);
       // Reset form fields
       setTitle('');
       setContent('');
+      setUploadedFileName(null);
     } catch (err: any) {
       setSaveError(err.message || 'Failed to save note');
     } finally {
@@ -320,16 +352,40 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
             />
           </div>
 
-          {/* Note Content Textarea */}
+          {/* Note Content Textarea with File Upload & Drag-and-Drop */}
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileSelect(file);
+                // reset input so same file can be re-selected if needed
+                e.target.value = '';
+              }}
+              accept=".txt,.md,.srt,.json,.csv,.log,.text,text/*"
+              className="hidden"
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                 <span className="text-amber-400 font-bold">•</span>
                 <span>{lang === 'bn' ? 'নোটপ্যাডের টেক্সট (Text Content):' : 'Note Text Content:'}</span>
               </label>
 
-              {/* Text helper buttons */}
-              <div className="flex items-center gap-2">
+              {/* Text helper buttons & File Upload */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* .txt File Upload Button */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] font-bold bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-500/40 transition-all shadow-sm"
+                  title="কম্পিউটার/মোবাইল থেকে সরাসরি .txt বা ডকুমেন্ট ফাইল আপলোড করুন"
+                >
+                  <FileUp className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{lang === 'bn' ? '📁 .txt ফাইল আপলোড' : '📁 Upload .txt'}</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handlePaste}
@@ -353,7 +409,10 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
                 {content && (
                   <button
                     type="button"
-                    onClick={() => setContent('')}
+                    onClick={() => {
+                      setContent('');
+                      setUploadedFileName(null);
+                    }}
                     className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-slate-400 hover:text-rose-400 transition-colors"
                     title="মুছে ফেলুন"
                   >
@@ -363,27 +422,73 @@ export const NotePad: React.FC<NotePadProps> = ({ lang }) => {
               </div>
             </div>
 
-            <div className="relative rounded-2xl bg-slate-950 border border-slate-700/80 focus-within:border-amber-500 transition-colors overflow-hidden">
+            {/* Uploaded File Indicator Banner */}
+            {uploadedFileName && (
+              <div className="mb-2 px-3 py-1.5 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-xs text-emerald-300 flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>ফাইল লোড হয়েছে: <strong>{uploadedFileName}</strong></span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setUploadedFileName(null)}
+                  className="text-slate-400 hover:text-white text-xs ml-2"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Drag & Drop enabled textarea box */}
+            <div 
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingFile(true);
+              }}
+              onDragLeave={() => setIsDraggingFile(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDraggingFile(false);
+                const file = e.dataTransfer.files?.[0];
+                if (file) handleFileSelect(file);
+              }}
+              className={`relative rounded-2xl bg-slate-950 border transition-all overflow-hidden ${
+                isDraggingFile
+                  ? 'border-emerald-500 ring-2 ring-emerald-500/30 bg-emerald-950/20'
+                  : 'border-slate-700/80 focus-within:border-amber-500'
+              }`}
+            >
+              {isDraggingFile && (
+                <div className="absolute inset-0 bg-slate-950/90 z-20 flex flex-col items-center justify-center gap-2 text-emerald-400 font-bold text-sm pointer-events-none">
+                  <UploadCloud className="w-8 h-8 animate-bounce" />
+                  <span>এখানে .txt ফাইলটি ছেড়ে দিন (Drop to load)</span>
+                </div>
+              )}
+
               <textarea
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 placeholder={
                   lang === 'bn'
-                    ? 'এখানে আপনার টেক্সট, স্ক্রিপ্ট, কোড বা যেকোনো লেখা পেস্ট বা টাইপ করুন...\nসেভ করলে একটি ইউনিক পাবলিক লিংক তৈরি হবে যা কোনো হাবিজাবি ডিজাইন ছাড়া নিখুঁতভাবে ওপেন হবে।'
-                    : 'Type or paste your text here...\nSaving will generate a permanent public link displaying raw, preformatted text.'
+                    ? 'এখানে যেকোনো সাইজের বড় টেক্সট, স্ক্রিপ্ট বা কোড পেস্ট করুন, অথবা উপরের "📁 .txt ফাইল আপলোড" বাটনে ক্লিক করে ফাইল নির্বাচন করুন...\n\nযত বড় টেক্সটই হোক না কেন, Firebase এ নিখুঁতভাবে সেভ হবে এবং শেয়ার করা লিংকে কোনো বাড়তি ফাঁকা স্পেস ছাড়া সরাসরি পড়া যাবে।'
+                    : 'Paste any large text, script, or click "📁 Upload .txt" to load your file...\nNo size limits, stored securely in Firebase.'
                 }
                 rows={12}
                 className="w-full bg-transparent p-4 text-xs sm:text-sm text-slate-100 placeholder:text-slate-600 font-mono leading-relaxed resize-y outline-none selection:bg-amber-500 selection:text-slate-950"
               />
 
               {/* Stats Footer bar inside textarea */}
-              <div className="px-4 py-2 border-t border-slate-800/80 bg-slate-950/90 flex items-center justify-between text-[11px] text-slate-400 font-mono">
+              <div className="px-4 py-2 border-t border-slate-800/80 bg-slate-950/90 flex flex-wrap items-center justify-between text-[11px] text-slate-400 font-mono gap-2">
                 <div className="flex items-center gap-3">
                   <span>{wordCount} শব্দ (Words)</span>
                   <span>•</span>
                   <span>{charCount} অক্ষর (Chars)</span>
+                  <span>•</span>
+                  <span className="text-amber-400">{approxKb} KB</span>
                 </div>
-                <span className="text-slate-500">UTF-8 Preformatted</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500">ড্র্যাগ & ড্রপ সাপোর্টেড • UTF-8</span>
+                </div>
               </div>
             </div>
           </div>

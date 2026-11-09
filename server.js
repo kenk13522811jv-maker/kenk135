@@ -60,6 +60,15 @@ function pruneMemoryCache() {
     }
   }
 }
+var notesMemoryCache = /* @__PURE__ */ new Map();
+function pruneNotesCache() {
+  if (notesMemoryCache.size > 200) {
+    const keys = Array.from(notesMemoryCache.keys());
+    for (let i = 0; i < 50; i++) {
+      notesMemoryCache.delete(keys[i]);
+    }
+  }
+}
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -443,39 +452,151 @@ app.post("/api/cleanup", async (_req, res) => {
 function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
+function isAICrawlerOrTool(req) {
+  const ua = (req.get("user-agent") || "").toLowerCase();
+  const accept = (req.get("accept") || "").toLowerCase();
+  if (req.query.raw === "1" || req.query.raw === "true") return true;
+  if (accept.includes("text/plain") && !accept.includes("text/html")) return true;
+  const botSignatures = [
+    "gptbot",
+    "chatgpt-user",
+    "chatgpt",
+    "openai",
+    "claude-web",
+    "claudebot",
+    "anthropic",
+    "perplexitybot",
+    "perplexity",
+    "google-extended",
+    "googlebot",
+    "bytespider",
+    "python-requests",
+    "python",
+    "curl",
+    "wget",
+    "httpie",
+    "postman",
+    "aiohttp",
+    "node-fetch",
+    "axios",
+    "go-http-client",
+    "urllib",
+    "scrapy"
+  ];
+  return botSignatures.some((sig) => ua.includes(sig));
+}
+async function loadFullNote(id) {
+  const now = Date.now();
+  const cached = notesMemoryCache.get(id);
+  if (cached) {
+    if (cached.expiresAt && cached.expiresAt > 0 && now > cached.expiresAt) {
+      notesMemoryCache.delete(id);
+      deleteDoc(doc(fbDb, "notes", id)).catch(() => {
+      });
+      return null;
+    }
+    return cached;
+  }
+  const docSnap = await getDoc(doc(fbDb, "notes", id));
+  if (!docSnap.exists()) {
+    return null;
+  }
+  const data = docSnap.data();
+  if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+    deleteDoc(doc(fbDb, "notes", id)).catch(() => {
+    });
+    return null;
+  }
+  let fullContent = data.content || "";
+  if (data.hasChunks && data.chunksCount > 0) {
+    try {
+      const chunksSnap = await getDocs(collection(fbDb, "notes", id, "chunks"));
+      const chunkDocs = chunksSnap.docs.map((c) => c.data()).sort((a, b) => a.chunkIndex - b.chunkIndex);
+      fullContent = chunkDocs.map((c) => c.data || "").join("");
+    } catch (cErr) {
+      console.error(`Error loading chunks for note ${id}:`, cErr);
+    }
+  }
+  const assembledNote = {
+    id: data.id || id,
+    title: data.title || "Untitled Note",
+    content: fullContent,
+    size: data.size || Buffer.byteLength(fullContent, "utf8"),
+    createdAt: Number(data.createdAt || now),
+    updatedAt: Number(data.updatedAt || now),
+    expiresAt: Number(data.expiresAt || 0),
+    retention: data.retention || "permanent",
+    isExpired: false,
+    publicUrl: data.publicUrl || "",
+    rawUrl: data.rawUrl || "",
+    hasChunks: Boolean(data.hasChunks),
+    chunksCount: data.chunksCount || 0
+  };
+  notesMemoryCache.set(id, assembledNote);
+  pruneNotesCache();
+  return assembledNote;
+}
 app.post("/api/notes", async (req, res) => {
   try {
     const { title = "", content = "", retention = "permanent" } = req.body;
     if (typeof content !== "string" || content.trim().length === 0) {
       return res.status(400).json({ error: "Note content cannot be empty" });
     }
-    if (Buffer.byteLength(content, "utf8") > 1024 * 1024) {
-      return res.status(400).json({ error: "Note exceeds 1MB limit" });
-    }
+    const cleanContent = content.replace(/\s+$/, "");
     const now = Date.now();
     const expiresAt = computeExpiresAt(retention, now);
     const id = `note_${now}_${Math.random().toString(36).substring(2, 7)}`;
-    const finalTitle = title && typeof title === "string" ? title.trim().slice(0, 150) : "Untitled Note";
+    const finalTitle = title && typeof title === "string" && title.trim().length > 0 ? title.trim().slice(0, 150) : "Untitled Note";
     const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
     const host = req.get("host") || `localhost:${PORT}`;
     const publicUrl = `${protocol}://${host}/note?id=${id}`;
     const rawUrl = `${protocol}://${host}/note/raw/${id}`;
+    const byteSize = Buffer.byteLength(cleanContent, "utf8");
+    const CHUNK_SIZE = 4e5;
+    const needsChunking = cleanContent.length > 5e5;
+    const chunksCount = needsChunking ? Math.ceil(cleanContent.length / CHUNK_SIZE) : 0;
     const noteDoc = {
       id,
       title: finalTitle,
-      content,
-      size: Buffer.byteLength(content, "utf8"),
+      content: needsChunking ? cleanContent.slice(0, 1e5) : cleanContent,
+      size: byteSize,
       createdAt: now,
       updatedAt: now,
       expiresAt: expiresAt || 0,
       retention,
       isExpired: false,
       publicUrl,
-      rawUrl
+      rawUrl,
+      hasChunks: needsChunking,
+      chunksCount
     };
+    if (needsChunking) {
+      const chunkWrites = [];
+      for (let i = 0; i < chunksCount; i++) {
+        const chunkData = cleanContent.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        chunkWrites.push(
+          setDoc(doc(fbDb, "notes", id, "chunks", `chunk_${i}`), {
+            chunkIndex: i,
+            data: chunkData
+          })
+        );
+      }
+      await Promise.all(chunkWrites);
+    }
     await setDoc(doc(fbDb, "notes", id), noteDoc);
-    console.log(`[Firebase Firestore] Note created: ${id} ("${finalTitle}")`);
-    return res.json({ success: true, note: noteDoc });
+    notesMemoryCache.set(id, {
+      ...noteDoc,
+      content: cleanContent
+    });
+    pruneNotesCache();
+    console.log(`[Firebase Firestore] Note created: ${id} ("${finalTitle}") [Size: ${(byteSize / 1024).toFixed(1)} KB, Chunks: ${chunksCount}]`);
+    return res.json({
+      success: true,
+      note: {
+        ...noteDoc,
+        content: cleanContent
+      }
+    });
   } catch (err) {
     console.error("Error creating note in Firestore:", err);
     return res.status(500).json({ error: err.message || "Failed to save note to Firebase" });
@@ -505,7 +626,9 @@ app.get("/api/notes", async (_req, res) => {
         retention: data.retention || (expiresAt ? "1day" : "permanent"),
         isExpired: false,
         publicUrl: data.publicUrl,
-        rawUrl: data.rawUrl
+        rawUrl: data.rawUrl,
+        hasChunks: Boolean(data.hasChunks),
+        chunksCount: data.chunksCount || 0
       });
     }
     notes.sort((a, b) => b.createdAt - a.createdAt);
@@ -518,18 +641,11 @@ app.get("/api/notes", async (_req, res) => {
 app.get("/api/notes/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const docSnap = await getDoc(doc(fbDb, "notes", id));
-    if (!docSnap.exists()) {
-      return res.status(404).json({ error: "Note not found" });
+    const note = await loadFullNote(id);
+    if (!note) {
+      return res.status(404).json({ error: "Note not found or expired" });
     }
-    const data = docSnap.data();
-    const now = Date.now();
-    if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
-      deleteDoc(doc(fbDb, "notes", id)).catch(() => {
-      });
-      return res.status(404).json({ error: "Note expired" });
-    }
-    return res.json({ success: true, note: data });
+    return res.json({ success: true, note });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Failed to fetch note" });
   }
@@ -537,6 +653,13 @@ app.get("/api/notes/:id", async (req, res) => {
 app.delete("/api/notes/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    notesMemoryCache.delete(id);
+    try {
+      const chunksSnap = await getDocs(collection(fbDb, "notes", id, "chunks"));
+      const chunkDeletes = chunksSnap.docs.map((c) => deleteDoc(doc(fbDb, "notes", id, "chunks", c.id)));
+      await Promise.all(chunkDeletes);
+    } catch {
+    }
     await deleteDoc(doc(fbDb, "notes", id));
     console.log(`[Firebase Firestore] Deleted note: ${id}`);
     return res.json({ success: true });
@@ -552,19 +675,12 @@ app.all(["/note/raw/:id", "/api/notes/:id/raw"], async (req, res) => {
   if (req.method === "OPTIONS") return res.sendStatus(200);
   try {
     const { id } = req.params;
-    const docSnap = await getDoc(doc(fbDb, "notes", id));
-    if (!docSnap.exists()) {
-      return res.status(404).send("Note not found");
-    }
-    const data = docSnap.data();
-    const now = Date.now();
-    if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
-      deleteDoc(doc(fbDb, "notes", id)).catch(() => {
-      });
-      return res.status(404).send("Note expired according to retention policy");
+    const note = await loadFullNote(id);
+    if (!note) {
+      return res.status(404).send("Note not found or expired");
     }
     res.setHeader("Cache-Control", "public, max-age=300");
-    return res.send(data.content || "");
+    return res.send(note.content || "");
   } catch (err) {
     return res.status(500).send(`Error reading note: ${err.message}`);
   }
@@ -575,68 +691,60 @@ app.get(["/note", "/note/:id"], async (req, res, next) => {
     if (!id) {
       return next();
     }
-    const docSnap = await getDoc(doc(fbDb, "notes", id));
-    if (!docSnap.exists()) {
+    const note = await loadFullNote(id);
+    if (!note) {
       return res.status(404).send(`
         <!DOCTYPE html>
         <html lang="bn">
         <head><meta charset="utf-8"><title>Note Not Found</title></head>
-        <body style="background:#090d16;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:90vh;">
+        <body style="background:#090d16;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:90vh;margin:0;">
           <div style="text-align:center;">
-            <h1 style="color:#f43f5e;">404 - \u09A8\u09CB\u099F \u09AA\u09BE\u0993\u09DF\u09BE \u09AF\u09BE\u09DF\u09A8\u09BF</h1>
-            <p>\u098F\u0987 \u09A8\u09CB\u099F\u099F\u09BF \u09AE\u09C1\u099B\u09C7 \u09AB\u09C7\u09B2\u09BE \u09B9\u09DF\u09C7\u099B\u09C7 \u0985\u09A5\u09AC\u09BE \u09AE\u09C7\u09DF\u09BE\u09A6\u09C7\u09B0 \u09B8\u09AE\u09DF \u09AA\u09BE\u09B0 \u09B9\u09DF\u09C7 \u0997\u09C7\u099B\u09C7\u0964</p>
-            <a href="/" style="color:#f59e0b;text-decoration:none;">\u2190 \u09B9\u09CB\u09AE\u09AA\u09C7\u099C\u09C7 \u09AB\u09BF\u09B0\u09C7 \u09AF\u09BE\u09A8</a>
+            <h1 style="color:#f43f5e;margin-bottom:0.5rem;">404 - \u09A8\u09CB\u099F \u09AA\u09BE\u0993\u09DF\u09BE \u09AF\u09BE\u09DF\u09A8\u09BF</h1>
+            <p style="color:#94a3b8;margin-bottom:1.5rem;">\u098F\u0987 \u09A8\u09CB\u099F\u099F\u09BF \u09AE\u09C1\u099B\u09C7 \u09AB\u09C7\u09B2\u09BE \u09B9\u09DF\u09C7\u099B\u09C7 \u0985\u09A5\u09AC\u09BE \u09AE\u09C7\u09DF\u09BE\u09A6\u09C7\u09B0 \u09B8\u09AE\u09DF \u09AA\u09BE\u09B0 \u09B9\u09DF\u09C7 \u0997\u09C7\u099B\u09C7\u0964</p>
+            <a href="/" style="color:#f59e0b;text-decoration:none;font-weight:bold;">\u2190 \u09B9\u09CB\u09AE\u09AA\u09C7\u099C\u09C7 \u09AB\u09BF\u09B0\u09C7 \u09AF\u09BE\u09A8</a>
           </div>
         </body>
         </html>
       `);
     }
-    const data = docSnap.data();
-    const now = Date.now();
-    if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
-      deleteDoc(doc(fbDb, "notes", id)).catch(() => {
-      });
-      return res.status(404).send("Note expired according to retention policy");
-    }
-    const isCurl = (req.get("user-agent") || "").toLowerCase().includes("curl");
-    const isWget = (req.get("user-agent") || "").toLowerCase().includes("wget");
-    const wantsRaw = req.query.raw === "1" || req.query.raw === "true" || req.headers.accept === "text/plain" || isCurl || isWget;
-    if (wantsRaw) {
+    if (isAICrawlerOrTool(req)) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.setHeader("Access-Control-Allow-Origin", "*");
-      return res.send(data.content || "");
+      res.setHeader("Cache-Control", "public, max-age=300");
+      return res.send(note.content || "");
     }
-    const safeTitle = escapeHtml(data.title || "Untitled Note");
-    const safeContent = escapeHtml(data.content || "");
-    const dateFormatted = new Date(data.createdAt).toLocaleString("bn-BD", { dateStyle: "medium", timeStyle: "short" });
-    const wordCount = (data.content || "").trim().split(/\s+/).filter(Boolean).length;
-    const charCount = (data.content || "").length;
+    const safeTitle = escapeHtml(note.title || "Untitled Note");
+    const cleanContent = (note.content || "").replace(/\s+$/, "");
+    const safeContent = escapeHtml(cleanContent);
+    const dateFormatted = new Date(note.createdAt).toLocaleString("bn-BD", { dateStyle: "medium", timeStyle: "short" });
+    const wordCount = cleanContent.trim().split(/\s+/).filter(Boolean).length;
+    const charCount = cleanContent.length;
     const html = `<!DOCTYPE html>
 <html lang="bn">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${safeTitle} - Clean Note</title>
-  <meta name="description" content="Clean, distraction-free preformatted note" />
+  <meta name="description" content="Clean, preformatted text note" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
+    html, body {
       background-color: #030712;
       color: #f3f4f6;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
+      margin: 0;
+      padding: 0;
       line-height: 1.6;
+      min-height: auto;
     }
     .topbar {
       position: sticky;
       top: 0;
       z-index: 50;
-      background: rgba(3, 7, 18, 0.92);
+      background: rgba(3, 7, 18, 0.95);
       backdrop-filter: blur(12px);
       border-bottom: 1px solid #1f2937;
-      padding: 0.75rem 1.25rem;
+      padding: 0.65rem 1.25rem;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
@@ -706,31 +814,33 @@ app.get(["/note", "/note/:id"], async (req, res, next) => {
       color: #030712;
     }
     .main-wrap {
-      flex: 1;
-      max-width: 1000px;
+      max-width: 1050px;
       width: 100%;
-      margin: 0 auto;
-      padding: 1.5rem 1.25rem 3rem 1.25rem;
+      margin: 0.75rem auto 1rem auto;
+      padding: 0 1rem;
     }
     .note-box {
       background: #0b0f19;
       border: 1px solid #1f2937;
       border-radius: 0.75rem;
-      padding: 1.5rem;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+      padding: 1.25rem 1.5rem;
+      box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.6);
     }
     pre {
+      margin: 0;
+      padding: 0;
       white-space: pre-wrap;
       word-break: break-word;
       font-family: inherit;
-      font-size: 0.88rem;
+      font-size: 0.9rem;
       color: #e5e7eb;
-      line-height: 1.7;
+      line-height: 1.65;
       tab-size: 4;
       outline: none;
     }
     .footer-notice {
-      margin-top: 1.5rem;
+      margin-top: 0.75rem;
+      margin-bottom: 1.25rem;
       font-size: 0.7rem;
       color: #6b7280;
       text-align: center;
