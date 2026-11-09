@@ -4,6 +4,7 @@ import { StatsBar } from './components/StatsBar';
 import { UploadZone } from './components/UploadZone';
 import { Dashboard } from './components/Dashboard';
 import { VideoTemplateGenerator } from './components/VideoTemplateGenerator';
+import { NotePad } from './components/NotePad';
 import { MediaPreviewModal } from './components/MediaPreviewModal';
 import { FirebaseSettingsModal } from './components/FirebaseSettingsModal';
 import { PythonExportModal } from './components/PythonExportModal';
@@ -11,12 +12,12 @@ import { Language, UploadedFileItem } from './types';
 import { subscribeToAssets, runAutomatedCleanup, uploadAsset } from './services/assetService';
 import { getActiveFirebaseConfig, testFirestoreConnection } from './services/firebase';
 import { translations } from './services/translations';
-import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2, Clapperboard } from 'lucide-react';
+import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2, Clapperboard, FileText } from 'lucide-react';
 
 export default function App() {
   const [lang, setLang] = useState<Language>('bn');
   const [files, setFiles] = useState<UploadedFileItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'template'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'template' | 'note'>('upload');
   const [isConnected, setIsConnected] = useState<boolean>(true);
 
   // Modals
@@ -43,6 +44,17 @@ export default function App() {
     const cleanupInterval = setInterval(() => {
       runAutomatedCleanup();
     }, 30000);
+
+    // Check URL query parameters (e.g. ?tab=note or ?tab=template)
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabParam = urlParams.get('tab');
+    if (tabParam === 'note') {
+      setActiveTab('note');
+    } else if (tabParam === 'template') {
+      setActiveTab('template');
+    } else if (tabParam === 'dashboard') {
+      setActiveTab('dashboard');
+    }
 
     return () => {
       unsubscribe();
@@ -123,6 +135,7 @@ export default function App() {
         onOpenFirebaseSettings={() => setIsFirebaseSettingsOpen(true)}
         onOpenPython={() => setIsPythonOpen(true)}
         onOpenTemplate={() => setActiveTab('template')}
+        onOpenNote={() => setActiveTab('note')}
         activeTab={activeTab}
       />
 
@@ -230,11 +243,28 @@ export default function App() {
                 AI
               </span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('note')}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                activeTab === 'note'
+                  ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/25'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>{t.noteTab}</span>
+              <span className={`text-[10px] uppercase font-bold px-1.5 py-0.2 rounded-full ${
+                activeTab === 'note' ? 'bg-slate-950/40 text-slate-950' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+              }`}>
+                NEW
+              </span>
+            </button>
           </div>
         </div>
 
         {/* Stats Overview */}
-        {activeTab !== 'template' && <StatsBar files={files} lang={lang} />}
+        {activeTab !== 'template' && activeTab !== 'note' && <StatsBar files={files} lang={lang} />}
 
         {/* Tab Content */}
         {activeTab === 'upload' && (
@@ -292,6 +322,12 @@ export default function App() {
         {activeTab === 'template' && (
           <div className="animate-in fade-in duration-200">
             <VideoTemplateGenerator lang={lang} />
+          </div>
+        )}
+
+        {activeTab === 'note' && (
+          <div className="animate-in fade-in duration-200">
+            <NotePad lang={lang} />
           </div>
         )}
       </main>

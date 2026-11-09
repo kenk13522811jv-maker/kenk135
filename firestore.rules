@@ -23,6 +23,14 @@ service cloud.firestore {
              data.retention in ['permanent', '1day', '2days', '3days'];
     }
 
+    function isValidNote(data) {
+      return data.keys().hasAll(['id', 'content', 'createdAt', 'retention']) &&
+             data.id is string && isValidId(data.id) &&
+             data.content is string && data.content.size() <= 1048576 &&
+             data.createdAt is number &&
+             data.retention in ['permanent', '1day', '2days', '3days'];
+    }
+
     match /assets/{assetId} {
       allow read: if true;
       allow create: if isValidId(assetId) && isValidAsset(request.resource.data);
@@ -33,6 +41,13 @@ service cloud.firestore {
         allow read: if true;
         allow write: if isValidId(assetId) && isValidId(chunkId);
       }
+    }
+
+    match /notes/{noteId} {
+      allow read: if true;
+      allow create: if isValidId(noteId) && isValidNote(request.resource.data);
+      allow update: if isValidId(noteId) && isValidNote(request.resource.data);
+      allow delete: if isValidId(noteId);
     }
   }
 }

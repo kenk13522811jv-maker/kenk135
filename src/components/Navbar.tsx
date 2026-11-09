@@ -1,5 +1,5 @@
 import React from 'react';
-import { Flame, Settings, Code, Globe2, ShieldCheck, Database, Clapperboard } from 'lucide-react';
+import { Flame, Settings, Code, Globe2, ShieldCheck, Database, Clapperboard, FileText } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../services/translations';
 import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
@@ -10,6 +10,7 @@ interface NavbarProps {
   onOpenFirebaseSettings: () => void;
   onOpenPython: () => void;
   onOpenTemplate?: () => void;
+  onOpenNote?: () => void;
   activeTab?: string;
 }
 
@@ -19,6 +20,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenFirebaseSettings,
   onOpenPython,
   onOpenTemplate,
+  onOpenNote,
   activeTab,
 }) => {
   const t = translations[lang];
@@ -89,6 +91,21 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Clapperboard className="w-3.5 h-3.5" />
               <span>{lang === 'bn' ? 'টেমপ্লেট' : 'Template'}</span>
+            </button>
+          )}
+
+          {/* Note Notepad Trigger */}
+          {onOpenNote && (
+            <button
+              onClick={onOpenNote}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                activeTab === 'note'
+                  ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-500/20'
+                  : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border-slate-700 hover:border-amber-500/40'
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'Note' : 'Note'}</span>
             </button>
           )}
 

@@ -29,3 +29,17 @@ export interface UploadedFileItem {
 }
 
 export type Language = 'bn' | 'en';
+
+export interface NoteItem {
+  id: string;
+  title: string;
+  content: string;
+  size: number;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number | null;
+  retention: RetentionOption;
+  isExpired?: boolean;
+  publicUrl: string;
+  rawUrl: string;
+}
