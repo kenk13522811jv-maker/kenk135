@@ -43,3 +43,19 @@ export interface NoteItem {
   publicUrl: string;
   rawUrl: string;
 }
+
+export interface AppItem {
+  id: string;
+  name: string; // original filename (e.g., app-release.apk)
+  appName: string; // user-friendly app display name
+  size: number;
+  type?: string;
+  uploadedAt: number;
+  expiresAt: number | null;
+  retention: RetentionOption;
+  isExpired?: boolean;
+  publicUrl: string; // landing page with download button
+  downloadUrl: string; // direct .apk binary download
+  downloadsCount: number;
+}
+

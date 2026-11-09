@@ -30,6 +30,15 @@ service cloud.firestore {
              data.retention in ['permanent', '1day', '2days', '3days'];
     }
 
+    function isValidApp(data) {
+      return data.keys().hasAll(['id', 'name', 'size', 'uploadedAt', 'retention']) &&
+             data.id is string && isValidId(data.id) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 255 &&
+             data.size is number && data.size >= 0 &&
+             data.uploadedAt is number &&
+             data.retention in ['permanent', '1day', '2days', '3days'];
+    }
+
     match /assets/{assetId} {
       allow read: if true;
       allow create: if isValidId(assetId) && isValidAsset(request.resource.data);
@@ -51,6 +60,18 @@ service cloud.firestore {
       match /chunks/{chunkId} {
         allow read: if true;
         allow write: if isValidId(noteId) && isValidId(chunkId);
+      }
+    }
+
+    match /apps/{appId} {
+      allow read: if true;
+      allow create: if isValidId(appId) && isValidApp(request.resource.data);
+      allow update: if isValidId(appId) && isValidApp(request.resource.data);
+      allow delete: if isValidId(appId);
+
+      match /chunks/{chunkId} {
+        allow read: if true;
+        allow write: if isValidId(appId) && isValidId(chunkId);
       }
     }
   }

@@ -69,6 +69,15 @@ function pruneNotesCache() {
     }
   }
 }
+var appsMemoryCache = /* @__PURE__ */ new Map();
+function pruneAppsCache() {
+  if (appsMemoryCache.size > 60) {
+    const keys = Array.from(appsMemoryCache.keys());
+    for (let i = 0; i < 15; i++) {
+      appsMemoryCache.delete(keys[i]);
+    }
+  }
+}
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -912,6 +921,541 @@ app.get(["/note", "/note/:id"], async (req, res, next) => {
   } catch (err) {
     console.error("Error serving clean note view:", err);
     return res.status(500).send("Error rendering note");
+  }
+});
+async function loadFullAppBuffer(id) {
+  const now = Date.now();
+  const cached = appsMemoryCache.get(id);
+  if (cached && cached.buffer) {
+    if (cached.expiresAt > 0 && now > cached.expiresAt) {
+      appsMemoryCache.delete(id);
+      deleteDoc(doc(fbDb, "apps", id)).catch(() => {
+      });
+      return null;
+    }
+    return { app: cached, buffer: cached.buffer };
+  }
+  const docSnap = await getDoc(doc(fbDb, "apps", id));
+  if (!docSnap.exists()) {
+    return null;
+  }
+  const data = docSnap.data();
+  if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+    deleteDoc(doc(fbDb, "apps", id)).catch(() => {
+    });
+    return null;
+  }
+  let buffer = null;
+  if (data.dataUrl && data.dataUrl.startsWith("data:")) {
+    const match = data.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (match) {
+      buffer = Buffer.from(match[2], "base64");
+    }
+  } else if (data.hasChunks && data.chunksCount > 0) {
+    const chunkPromises = [];
+    for (let i = 0; i < data.chunksCount; i++) {
+      chunkPromises.push(getDoc(doc(fbDb, "apps", id, "chunks", `chunk_${i}`)));
+    }
+    const chunkDocs = await Promise.all(chunkPromises);
+    let fullBase64 = "";
+    for (const cDoc of chunkDocs) {
+      if (cDoc.exists()) {
+        fullBase64 += cDoc.data()?.data || "";
+      }
+    }
+    if (fullBase64.length > 0) {
+      buffer = Buffer.from(fullBase64, "base64");
+    }
+  }
+  if (!buffer) {
+    return null;
+  }
+  const appItem = {
+    id: data.id || id,
+    name: data.name || "app.apk",
+    appName: data.appName || data.name || "Android App",
+    size: data.size || buffer.length,
+    buffer,
+    type: data.type || "application/vnd.android.package-archive",
+    uploadedAt: Number(data.uploadedAt || now),
+    expiresAt: Number(data.expiresAt || 0),
+    retention: data.retention || "permanent",
+    isExpired: false,
+    publicUrl: data.publicUrl || "",
+    downloadUrl: data.downloadUrl || "",
+    downloadsCount: Number(data.downloadsCount || 0),
+    hasChunks: Boolean(data.hasChunks),
+    chunksCount: data.chunksCount || 0
+  };
+  appsMemoryCache.set(id, appItem);
+  pruneAppsCache();
+  return { app: appItem, buffer };
+}
+app.post("/api/apps/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No APK file received" });
+    }
+    const retention = req.body.retention || "permanent";
+    const rawAppName = req.body.appName || "";
+    const now = Date.now();
+    const expiresAt = computeExpiresAt(retention, now);
+    const originalName = req.file.originalname || "application.apk";
+    const safeBase = originalName.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 35);
+    const id = `app_${now}_${Math.random().toString(36).substring(2, 7)}_${safeBase || "apk"}`;
+    const cleanAppName = rawAppName.trim() || originalName.replace(/\.[^/.]+$/, "").replace(/[_.-]/g, " ");
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.get("host") || `localhost:${PORT}`;
+    const publicUrl = `${protocol}://${host}/app?id=${id}`;
+    const downloadUrl = `${protocol}://${host}/app/download/${id}`;
+    appsMemoryCache.set(id, {
+      id,
+      name: originalName,
+      appName: cleanAppName,
+      size: req.file.size,
+      buffer: req.file.buffer,
+      type: "application/vnd.android.package-archive",
+      uploadedAt: now,
+      expiresAt: expiresAt || 0,
+      retention,
+      isExpired: false,
+      publicUrl,
+      downloadUrl,
+      downloadsCount: 0
+    });
+    pruneAppsCache();
+    const base64Data = req.file.buffer.toString("base64");
+    const CHUNK_SIZE = 4e5;
+    const needsChunking = base64Data.length > 6e5;
+    const chunksCount = needsChunking ? Math.ceil(base64Data.length / CHUNK_SIZE) : 0;
+    const newApp = {
+      id,
+      name: originalName,
+      appName: cleanAppName,
+      size: req.file.size,
+      type: "application/vnd.android.package-archive",
+      publicUrl,
+      downloadUrl,
+      uploadedAt: now,
+      expiresAt: expiresAt || 0,
+      retention,
+      isExpired: false,
+      downloadsCount: 0,
+      hasChunks: needsChunking,
+      chunksCount,
+      dataUrl: needsChunking ? "" : `data:application/vnd.android.package-archive;base64,${base64Data}`
+    };
+    if (needsChunking) {
+      const chunkWrites = [];
+      for (let i = 0; i < chunksCount; i++) {
+        const chunkData = base64Data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        chunkWrites.push(
+          setDoc(doc(fbDb, "apps", id, "chunks", `chunk_${i}`), {
+            chunkIndex: i,
+            data: chunkData
+          })
+        );
+      }
+      await Promise.all(chunkWrites);
+    }
+    await setDoc(doc(fbDb, "apps", id), newApp);
+    console.log(`[Firebase Firestore] APK App created: ${id} ("${cleanAppName}", Size: ${(req.file.size / (1024 * 1024)).toFixed(2)} MB)`);
+    return res.json({ success: true, app: newApp });
+  } catch (err) {
+    console.error("Error uploading APK to Firestore:", err);
+    return res.status(500).json({ error: err.message || "Failed to save APK app" });
+  }
+});
+app.get("/api/apps", async (_req, res) => {
+  try {
+    const snapshot = await getDocs(collection(fbDb, "apps"));
+    const now = Date.now();
+    const appsList = [];
+    for (const d of snapshot.docs) {
+      const data = d.data();
+      const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
+      if (expiresAt && now > expiresAt) {
+        deleteDoc(doc(fbDb, "apps", d.id)).catch(() => {
+        });
+        continue;
+      }
+      appsList.push({
+        id: data.id || d.id,
+        name: data.name || "app.apk",
+        appName: data.appName || data.name || "Android App",
+        size: Number(data.size || 0),
+        type: data.type || "application/vnd.android.package-archive",
+        uploadedAt: Number(data.uploadedAt || now),
+        expiresAt,
+        retention: data.retention || (expiresAt ? "1day" : "permanent"),
+        isExpired: false,
+        publicUrl: data.publicUrl,
+        downloadUrl: data.downloadUrl,
+        downloadsCount: Number(data.downloadsCount || 0),
+        hasChunks: Boolean(data.hasChunks),
+        chunksCount: data.chunksCount || 0
+      });
+    }
+    appsList.sort((a, b) => b.uploadedAt - a.uploadedAt);
+    return res.json(appsList);
+  } catch (err) {
+    console.error("Error fetching apps from Firestore:", err);
+    return res.json([]);
+  }
+});
+app.get("/api/apps/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const docSnap = await getDoc(doc(fbDb, "apps", id));
+    if (!docSnap.exists()) {
+      return res.status(404).json({ error: "App not found" });
+    }
+    const data = docSnap.data();
+    const now = Date.now();
+    if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+      deleteDoc(doc(fbDb, "apps", id)).catch(() => {
+      });
+      return res.status(404).json({ error: "App expired" });
+    }
+    return res.json({ success: true, app: data });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to fetch app" });
+  }
+});
+app.delete("/api/apps/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    appsMemoryCache.delete(id);
+    try {
+      const chunksSnap = await getDocs(collection(fbDb, "apps", id, "chunks"));
+      const chunkDeletes = chunksSnap.docs.map((c) => deleteDoc(doc(fbDb, "apps", id, "chunks", c.id)));
+      await Promise.all(chunkDeletes);
+    } catch {
+    }
+    await deleteDoc(doc(fbDb, "apps", id));
+    console.log(`[Firebase Firestore] Deleted APK app: ${id}`);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to delete app" });
+  }
+});
+app.all(["/app/download/:id", "/api/apps/:id/download"], async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  try {
+    const { id } = req.params;
+    const appData = await loadFullAppBuffer(id);
+    if (!appData) {
+      return res.status(404).send("APK file not found or expired");
+    }
+    const { app: app2, buffer } = appData;
+    app2.downloadsCount = (app2.downloadsCount || 0) + 1;
+    setDoc(doc(fbDb, "apps", id), { downloadsCount: app2.downloadsCount }, { merge: true }).catch(() => {
+    });
+    const downloadFileName = app2.name.endsWith(".apk") ? app2.name : `${app2.name}.apk`;
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(downloadFileName)}"`);
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    if (req.method === "HEAD") {
+      return res.end();
+    }
+    return res.end(buffer);
+  } catch (err) {
+    console.error("Error streaming APK download:", err);
+    return res.status(500).send(`Error downloading APK: ${err.message}`);
+  }
+});
+app.get(["/app", "/app/:id"], async (req, res, next) => {
+  try {
+    const id = (req.params.id || req.query.id || "").trim();
+    if (!id) {
+      return next();
+    }
+    if (req.query.download === "1" || req.query.direct === "1") {
+      return res.redirect(`/app/download/${id}`);
+    }
+    const appData = await loadFullAppBuffer(id);
+    if (!appData) {
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html lang="bn">
+        <head><meta charset="utf-8"><title>App Not Found</title></head>
+        <body style="background:#090d16;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:90vh;margin:0;">
+          <div style="text-align:center;padding:1.5rem;">
+            <div style="font-size:3rem;margin-bottom:0.5rem;">\u{1F4F1}</div>
+            <h1 style="color:#f43f5e;margin-bottom:0.5rem;">404 - \u0985\u09CD\u09AF\u09BE\u09AA \u09AB\u09BE\u0987\u09B2 \u09AA\u09BE\u0993\u09DF\u09BE \u09AF\u09BE\u09DF\u09A8\u09BF</h1>
+            <p style="color:#94a3b8;margin-bottom:1.5rem;">\u098F\u0987 \u098F\u09AA\u09BF\u0995\u09C7 (APK) \u09AB\u09BE\u0987\u09B2\u099F\u09BF \u09AE\u09C1\u099B\u09C7 \u09AB\u09C7\u09B2\u09BE \u09B9\u09DF\u09C7\u099B\u09C7 \u0985\u09A5\u09AC\u09BE \u09AE\u09C7\u09DF\u09BE\u09A6\u09C7\u09B0 \u09B8\u09AE\u09DF \u09AA\u09BE\u09B0 \u09B9\u09DF\u09C7 \u0997\u09C7\u099B\u09C7\u0964</p>
+            <a href="/" style="color:#10b981;text-decoration:none;font-weight:bold;">\u2190 \u09B9\u09CB\u09AE\u09AA\u09C7\u099C\u09C7 \u09AB\u09BF\u09B0\u09C7 \u09AF\u09BE\u09A8</a>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+    const { app: app2 } = appData;
+    const safeAppName = escapeHtml(app2.appName || app2.name || "Android Application");
+    const safeFileName = escapeHtml(app2.name || "application.apk");
+    const sizeMb = (app2.size / (1024 * 1024)).toFixed(2);
+    const dateFormatted = new Date(app2.uploadedAt).toLocaleString("bn-BD", { dateStyle: "medium", timeStyle: "short" });
+    const directDownloadUrl = app2.downloadUrl || `/app/download/${app2.id}`;
+    const retentionText = app2.retention === "permanent" ? "\u267E\uFE0F \u09B8\u09CD\u09A5\u09BE\u09DF\u09C0 (Permanent)" : `\u23F3 \u09AE\u09C7\u09DF\u09BE\u09A6: ${app2.retention}`;
+    const html = `<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${safeAppName} - APK \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u0993 \u0987\u09A8\u09B8\u09CD\u099F\u09B2</title>
+  <meta name="description" content="Download and install ${safeAppName} Android APK directly to your phone." />
+  <meta property="og:title" content="${safeAppName} - Android APK Download" />
+  <meta property="og:description" content="\u09AB\u09BE\u0987\u09B2 \u09B8\u09BE\u0987\u099C: ${sizeMb} MB \u2022 \u09B8\u09B0\u09BE\u09B8\u09B0\u09BF \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u0995\u09B0\u09C7 \u0986\u09AA\u09A8\u09BE\u09B0 \u09AB\u09CB\u09A8\u09C7 \u0987\u09A8\u09B8\u09CD\u099F\u09B2 \u0995\u09B0\u09C1\u09A8\u0964" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: #030712;
+      color: #f3f4f6;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem 1rem;
+      background-image: radial-gradient(circle at 50% 20%, rgba(16, 185, 129, 0.12) 0%, rgba(3, 7, 18, 0) 70%);
+    }
+    .card {
+      background: #0b1120;
+      border: 1px solid #1f293d;
+      border-radius: 1.5rem;
+      max-width: 480px;
+      width: 100%;
+      padding: 2rem 1.75rem;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7), 0 0 30px -10px rgba(16, 185, 129, 0.2);
+      text-align: center;
+    }
+    .app-icon {
+      width: 76px;
+      height: 76px;
+      margin: 0 auto 1.25rem auto;
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      border-radius: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.5rem;
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.4);
+    }
+    .app-title {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 0.35rem;
+      line-height: 1.3;
+    }
+    .app-sub {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      font-family: monospace;
+      word-break: break-all;
+      margin-bottom: 1.25rem;
+    }
+    .meta-pills {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1.75rem;
+    }
+    .pill {
+      background: #111827;
+      border: 1px solid #1f2937;
+      color: #cbd5e1;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+    }
+    .pill-green {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+    .btn-download {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      width: 100%;
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: #022c22;
+      font-size: 1.05rem;
+      font-weight: 800;
+      padding: 0.95rem 1.5rem;
+      border-radius: 1rem;
+      text-decoration: none;
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.5);
+      transition: all 0.15s ease;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-download:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 30px -5px rgba(16, 185, 129, 0.6);
+      background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    }
+    .actions-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.6rem;
+      margin-top: 0.85rem;
+    }
+    .btn-secondary {
+      background: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.65rem 0.85rem;
+      border-radius: 0.75rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+    .btn-secondary:hover {
+      background: #334155;
+      color: #ffffff;
+    }
+    .guide-box {
+      margin-top: 1.75rem;
+      background: #060a12;
+      border: 1px solid #1e293b;
+      border-radius: 1rem;
+      padding: 1.1rem;
+      text-align: left;
+    }
+    .guide-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #38bdf8;
+      margin-bottom: 0.6rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .guide-steps {
+      font-size: 0.72rem;
+      color: #94a3b8;
+      line-height: 1.6;
+      padding-left: 1.1rem;
+    }
+    .guide-steps li {
+      margin-bottom: 0.35rem;
+    }
+    .footer-brand {
+      margin-top: 1.5rem;
+      font-size: 0.72rem;
+      color: #64748b;
+    }
+    .footer-brand a {
+      color: #10b981;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      background: #10b981;
+      color: #022c22;
+      font-weight: 700;
+      font-size: 0.85rem;
+      padding: 0.5rem 1.25rem;
+      border-radius: 9999px;
+      box-shadow: 0 10px 20px -5px rgba(0,0,0,0.5);
+      display: none;
+      animation: fadeIn 0.2s;
+      z-index: 99;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="app-icon">\u{1F916}</div>
+    <h1 class="app-title">${safeAppName}</h1>
+    <p class="app-sub">${safeFileName}</p>
+
+    <div class="meta-pills">
+      <span class="pill pill-green">\u{1F4E6} ${sizeMb} MB</span>
+      <span class="pill">${retentionText}</span>
+      <span class="pill">\u2B07\uFE0F ${app2.downloadsCount || 0} \u09AC\u09BE\u09B0 \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1</span>
+      <span class="pill">\u{1F4C5} ${dateFormatted}</span>
+    </div>
+
+    <!-- Direct Download & Install Button -->
+    <a href="${directDownloadUrl}" class="btn-download" download="${safeFileName}">
+      <span>\u{1F4F2} \u0985\u09CD\u09AF\u09BE\u09AA \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u0993 \u0987\u09A8\u09B8\u09CD\u099F\u09B2 \u0995\u09B0\u09C1\u09A8</span>
+    </a>
+
+    <div class="actions-grid">
+      <button class="btn-secondary" onclick="copyDirectLink()">
+        \u{1F517} \u09B8\u09B0\u09BE\u09B8\u09B0\u09BF \u09B2\u09BF\u0982\u0995 \u0995\u09AA\u09BF
+      </button>
+      <button class="btn-secondary" onclick="copyPageLink()">
+        \u{1F4E4} \u09B6\u09C7\u09DF\u09BE\u09B0 \u09AA\u09C7\u099C \u0995\u09AA\u09BF
+      </button>
+    </div>
+
+    <!-- Android Quick Installation Guide -->
+    <div class="guide-box">
+      <div class="guide-title">
+        <span>\u{1F4A1} \u09AB\u09CB\u09A8\u09C7 \u0987\u09A8\u09B8\u09CD\u099F\u09B2 \u0995\u09B0\u09BE\u09B0 \u09B8\u09B9\u099C \u09A8\u09BF\u09DF\u09AE:</span>
+      </div>
+      <ol class="guide-steps">
+        <li>\u0989\u09AA\u09B0\u09C7\u09B0 <strong>'\u0985\u09CD\u09AF\u09BE\u09AA \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u0993 \u0987\u09A8\u09B8\u09CD\u099F\u09B2 \u0995\u09B0\u09C1\u09A8'</strong> \u09AC\u09BE\u099F\u09A8\u09C7 \u099A\u09BE\u09AA \u09A6\u09BF\u09A8\u0964</li>
+        <li>\u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u09B8\u09AE\u09CD\u09AA\u09A8\u09CD\u09A8 \u09B9\u09B2\u09C7 \u09A8\u09CB\u099F\u09BF\u09AB\u09BF\u0995\u09C7\u09B6\u09A8 \u09AC\u09BE\u09B0 \u0985\u09A5\u09AC\u09BE \u09AB\u09CB\u09A8\u09C7\u09B0 <strong>Downloads</strong> \u09AB\u09CB\u09B2\u09CD\u09A1\u09BE\u09B0 \u09A5\u09C7\u0995\u09C7 <code>.apk</code> \u09AB\u09BE\u0987\u09B2\u099F\u09BF\u09A4\u09C7 \u099F\u09CD\u09AF\u09BE\u09AA \u0995\u09B0\u09C1\u09A8\u0964</li>
+        <li>\u09AF\u09A6\u09BF \u09A8\u09BF\u09B0\u09BE\u09AA\u09A4\u09CD\u09A4\u09BE \u09B8\u09A4\u09B0\u09CD\u0995\u09A4\u09BE \u09A6\u09C7\u0996\u09BE\u09DF, \u09A4\u09AC\u09C7 <strong>'Settings'</strong> \u098F \u0997\u09BF\u09DF\u09C7 <strong>'Allow from this source'</strong> \u099A\u09BE\u09B2\u09C1 \u0995\u09B0\u09C7 <strong>'Install'</strong> \u099A\u09BE\u09AA\u09C1\u09A8\u0964</li>
+      </ol>
+    </div>
+
+    <div class="footer-brand">
+      Firebase App Vault \u2022 <a href="/">\u{1F3E0} \u09B9\u09CB\u09AE \u0985\u09CD\u09AF\u09BE\u09AA\u09C7 \u09AB\u09BF\u09B0\u09C7 \u09AF\u09BE\u09A8</a>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">\u2713 \u09B2\u09BF\u0982\u0995 \u0995\u09AA\u09BF \u0995\u09B0\u09BE \u09B9\u09DF\u09C7\u099B\u09C7!</div>
+
+  <script>
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      toast.innerText = text;
+      toast.style.display = 'block';
+      setTimeout(() => { toast.style.display = 'none'; }, 2200);
+    }
+    function copyDirectLink() {
+      const rawUrl = '${directDownloadUrl}';
+      const url = rawUrl.startsWith('http') ? rawUrl : (window.location.origin + rawUrl);
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('\u2713 \u09B8\u09B0\u09BE\u09B8\u09B0\u09BF \u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1\u09C7\u09B0 APK \u09B2\u09BF\u0982\u0995 \u0995\u09AA\u09BF \u09B9\u09DF\u09C7\u099B\u09C7!');
+      });
+    }
+    function copyPageLink() {
+      navigator.clipboard.writeText(window.location.href).then(() => {
+        showToast('\u2713 \u0987\u09A8\u09B8\u09CD\u099F\u09B2\u09BE\u09B0 \u09AA\u09C7\u099C\u09C7\u09B0 \u09B2\u09BF\u0982\u0995 \u0995\u09AA\u09BF \u09B9\u09DF\u09C7\u099B\u09C7!');
+      });
+    }
+  </script>
+</body>
+</html>`;
+    return res.send(html);
+  } catch (err) {
+    console.error("Error serving app installer view:", err);
+    return res.status(500).send("Error rendering app view");
   }
 });
 async function bootstrap() {

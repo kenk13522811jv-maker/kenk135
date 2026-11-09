@@ -1,5 +1,5 @@
 import React from 'react';
-import { Flame, Settings, Code, Globe2, ShieldCheck, Database, Clapperboard, FileText } from 'lucide-react';
+import { Flame, Settings, Code, Globe2, ShieldCheck, Database, Clapperboard, FileText, Smartphone } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../services/translations';
 import { getActiveFirebaseConfig, isFirebaseConfigured } from '../services/firebase';
@@ -11,6 +11,7 @@ interface NavbarProps {
   onOpenPython: () => void;
   onOpenTemplate?: () => void;
   onOpenNote?: () => void;
+  onOpenApp?: () => void;
   activeTab?: string;
 }
 
@@ -21,6 +22,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenPython,
   onOpenTemplate,
   onOpenNote,
+  onOpenApp,
   activeTab,
 }) => {
   const t = translations[lang];
@@ -105,7 +107,22 @@ export const Navbar: React.FC<NavbarProps> = ({
               }`}
             >
               <FileText className="w-3.5 h-3.5" />
-              <span>{lang === 'bn' ? 'Note' : 'Note'}</span>
+              <span>{lang === 'bn' ? 'নোট' : 'Note'}</span>
+            </button>
+          )}
+
+          {/* App / APK Vault Trigger */}
+          {onOpenApp && (
+            <button
+              onClick={onOpenApp}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                activeTab === 'app'
+                  ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md shadow-emerald-500/20'
+                  : 'bg-slate-900 hover:bg-slate-800 text-emerald-400 border-slate-700 hover:border-emerald-500/40'
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>{lang === 'bn' ? 'অ্যাপ' : 'App'}</span>
             </button>
           )}
 

@@ -5,6 +5,7 @@ import { UploadZone } from './components/UploadZone';
 import { Dashboard } from './components/Dashboard';
 import { VideoTemplateGenerator } from './components/VideoTemplateGenerator';
 import { NotePad } from './components/NotePad';
+import { AppVault } from './components/AppVault';
 import { MediaPreviewModal } from './components/MediaPreviewModal';
 import { FirebaseSettingsModal } from './components/FirebaseSettingsModal';
 import { PythonExportModal } from './components/PythonExportModal';
@@ -12,12 +13,12 @@ import { Language, UploadedFileItem } from './types';
 import { subscribeToAssets, runAutomatedCleanup, uploadAsset } from './services/assetService';
 import { getActiveFirebaseConfig, testFirestoreConnection } from './services/firebase';
 import { translations } from './services/translations';
-import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2, Clapperboard, FileText } from 'lucide-react';
+import { Flame, Sparkles, UploadCloud, LayoutDashboard, Code, Bot, ShieldCheck, CheckCircle2, Clapperboard, FileText, Smartphone } from 'lucide-react';
 
 export default function App() {
   const [lang, setLang] = useState<Language>('bn');
   const [files, setFiles] = useState<UploadedFileItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'template' | 'note'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'dashboard' | 'template' | 'note' | 'app'>('upload');
   const [isConnected, setIsConnected] = useState<boolean>(true);
 
   // Modals
@@ -50,6 +51,8 @@ export default function App() {
     const tabParam = urlParams.get('tab');
     if (tabParam === 'note') {
       setActiveTab('note');
+    } else if (tabParam === 'app') {
+      setActiveTab('app');
     } else if (tabParam === 'template') {
       setActiveTab('template');
     } else if (tabParam === 'dashboard') {
@@ -136,6 +139,7 @@ export default function App() {
         onOpenPython={() => setIsPythonOpen(true)}
         onOpenTemplate={() => setActiveTab('template')}
         onOpenNote={() => setActiveTab('note')}
+        onOpenApp={() => setActiveTab('app')}
         activeTab={activeTab}
       />
 
@@ -254,17 +258,29 @@ export default function App() {
             >
               <FileText className="w-4 h-4" />
               <span>{t.noteTab}</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('app')}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                activeTab === 'app'
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/25'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Smartphone className="w-4 h-4" />
+              <span>{t.appTab}</span>
               <span className={`text-[10px] uppercase font-bold px-1.5 py-0.2 rounded-full ${
-                activeTab === 'note' ? 'bg-slate-950/40 text-slate-950' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                activeTab === 'app' ? 'bg-slate-950/40 text-slate-950' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
               }`}>
-                NEW
+                APK
               </span>
             </button>
           </div>
         </div>
 
         {/* Stats Overview */}
-        {activeTab !== 'template' && activeTab !== 'note' && <StatsBar files={files} lang={lang} />}
+        {activeTab !== 'template' && activeTab !== 'note' && activeTab !== 'app' && <StatsBar files={files} lang={lang} />}
 
         {/* Tab Content */}
         {activeTab === 'upload' && (
@@ -328,6 +344,12 @@ export default function App() {
         {activeTab === 'note' && (
           <div className="animate-in fade-in duration-200">
             <NotePad lang={lang} />
+          </div>
+        )}
+
+        {activeTab === 'app' && (
+          <div className="animate-in fade-in duration-200">
+            <AppVault lang={lang} />
           </div>
         )}
       </main>

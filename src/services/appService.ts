@@ -1,0 +1,73 @@
+import { AppItem, RetentionOption } from '../types';
+
+export async function uploadApp(
+  file: File,
+  appName?: string,
+  retention: RetentionOption = 'permanent',
+  onProgress?: (percent: number) => void
+): Promise<AppItem> {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('retention', retention);
+    if (appName && appName.trim()) {
+      formData.append('appName', appName.trim());
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/apps/upload');
+
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          onProgress(percent);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300 && data.success && data.app) {
+          resolve(data.app);
+        } else {
+          reject(new Error(data.error || `Upload failed with status ${xhr.status}`));
+        }
+      } catch (err: any) {
+        reject(new Error(err.message || 'Failed to parse response'));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('Network error during app upload'));
+    };
+
+    xhr.send(formData);
+  });
+}
+
+export async function fetchApps(): Promise<AppItem[]> {
+  try {
+    const res = await fetch('/api/apps');
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error('Failed to fetch apps:', err);
+    return [];
+  }
+}
+
+export async function deleteApp(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/apps/${id}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    return Boolean(res.ok && data.success);
+  } catch (err) {
+    console.error(`Failed to delete app ${id}:`, err);
+    return false;
+  }
+}
