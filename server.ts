@@ -2,6 +2,8 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
+import { promises as fsp } from 'fs';
 import { fileURLToPath } from 'url';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
@@ -20,6 +22,12 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+// Ensure dedicated directory for persistent APK binary files (high speed, 0 Firestore write quota consumed)
+const APPS_DIR = path.resolve(process.cwd(), 'uploads', 'apps');
+try {
+  fs.mkdirSync(APPS_DIR, { recursive: true });
+} catch {}
+
 // Firebase Configuration (Direct Cloud Firestore Connection - No Local Disk Dependency)
 const firebaseConfig = {
   projectId: process.env.VITE_FIREBASE_PROJECT_ID || 'gen-lang-client-0536368169',
@@ -33,10 +41,18 @@ const firebaseConfig = {
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const fbDb = getFirestore(fbApp, firebaseConfig.firestoreDatabaseId);
 
-// In-Memory storage (RAM only, 0 disk footprint on Render)
+// Safe timeout wrapper so Firestore operations never deadlock or hang the HTTP connection
+function withTimeout<T>(promise: Promise<T>, ms: number = 3000, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))
+  ]);
+}
+
+// Upload storage limits (handles up to 150MB APK files seamlessly)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB per file
+  limits: { fileSize: 150 * 1024 * 1024 }, // 150MB per file
 });
 
 // CORS middleware
@@ -50,8 +66,8 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '60mb' }));
-app.use(express.urlencoded({ extended: true, limit: '60mb' }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 
 // Helper to compute expiration
 function computeExpiresAt(retention: string, now: number): number | null {
@@ -1083,11 +1099,12 @@ app.get(['/note', '/note/:id'], async (req, res, next) => {
 
 // ================= APP / APK VAULT & INSTALLER ROUTES =================
 
-// Helper to load full app buffer from RAM cache or Cloud Firestore with subcollection chunks
+// Helper to load full app buffer from RAM cache, local disk, or Cloud Firestore
 async function loadFullAppBuffer(id: string): Promise<{ app: CachedApp; buffer: Buffer } | null> {
   const now = Date.now();
   const cached = appsMemoryCache.get(id);
 
+  // 1. Check RAM cache first
   if (cached && cached.buffer) {
     if (cached.expiresAt > 0 && now > cached.expiresAt) {
       appsMemoryCache.delete(id);
@@ -1097,68 +1114,101 @@ async function loadFullAppBuffer(id: string): Promise<{ app: CachedApp; buffer: 
     return { app: cached, buffer: cached.buffer };
   }
 
-  const docSnap = await getDoc(doc(fbDb, 'apps', id));
-  if (!docSnap.exists()) {
-    return null;
+  // 2. Check local disk
+  const diskPath = path.join(APPS_DIR, `${id}.apk`);
+  let diskBuffer: Buffer | null = null;
+  try {
+    if (fs.existsSync(diskPath)) {
+      diskBuffer = await fsp.readFile(diskPath);
+    }
+  } catch {}
+
+  // 3. Query Cloud Firestore
+  let firestoreData: any = null;
+  try {
+    const docSnap = await getDoc(doc(fbDb, 'apps', id));
+    if (docSnap.exists()) {
+      firestoreData = docSnap.data();
+    }
+  } catch (err: any) {
+    console.warn(`[Firestore] App doc lookup warning: ${err?.message}`);
   }
 
-  const data = docSnap.data();
-  if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
-    deleteDoc(doc(fbDb, 'apps', id)).catch(() => {});
-    return null;
+  // Check expiration if doc found
+  if (firestoreData) {
+    if (firestoreData.expiresAt && firestoreData.expiresAt > 0 && now > firestoreData.expiresAt) {
+      deleteDoc(doc(fbDb, 'apps', id)).catch(() => {});
+      if (diskBuffer) {
+        fsp.unlink(diskPath).catch(() => {});
+      }
+      return null;
+    }
   }
 
-  let buffer: Buffer | null = null;
-  if (data.dataUrl && data.dataUrl.startsWith('data:')) {
-    const match = data.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (match) {
-      buffer = Buffer.from(match[2], 'base64');
-    }
-  } else if (data.hasChunks && data.chunksCount > 0) {
-    const chunkPromises = [];
-    for (let i = 0; i < data.chunksCount; i++) {
-      chunkPromises.push(getDoc(doc(fbDb, 'apps', id, 'chunks', `chunk_${i}`)));
-    }
-    const chunkDocs = await Promise.all(chunkPromises);
-    let fullBase64 = '';
-    for (const cDoc of chunkDocs) {
-      if (cDoc.exists()) {
-        fullBase64 += cDoc.data()?.data || '';
+  let finalBuffer: Buffer | null = diskBuffer;
+
+  // 4. If not on disk, check Firestore embedded dataUrl or subcollection chunks (backward compatibility)
+  if (!finalBuffer && firestoreData) {
+    if (firestoreData.dataUrl && firestoreData.dataUrl.startsWith('data:')) {
+      const match = firestoreData.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        finalBuffer = Buffer.from(match[2], 'base64');
+      }
+    } else if (firestoreData.hasChunks && firestoreData.chunksCount > 0) {
+      try {
+        const chunkPromises = [];
+        for (let i = 0; i < firestoreData.chunksCount; i++) {
+          chunkPromises.push(getDoc(doc(fbDb, 'apps', id, 'chunks', `chunk_${i}`)));
+        }
+        const chunkDocs = await Promise.all(chunkPromises);
+        let fullBase64 = '';
+        for (const cDoc of chunkDocs) {
+          if (cDoc.exists()) {
+            fullBase64 += cDoc.data()?.data || '';
+          }
+        }
+        if (fullBase64.length > 0) {
+          finalBuffer = Buffer.from(fullBase64, 'base64');
+        }
+      } catch (chunkErr) {
+        console.error('Error fetching Firestore chunks:', chunkErr);
       }
     }
-    if (fullBase64.length > 0) {
-      buffer = Buffer.from(fullBase64, 'base64');
-    }
   }
 
-  if (!buffer) {
+  if (!finalBuffer) {
     return null;
+  }
+
+  // Cache to disk if not already there
+  if (!fs.existsSync(diskPath)) {
+    fsp.writeFile(diskPath, finalBuffer).catch(() => {});
   }
 
   const appItem: CachedApp = {
-    id: data.id || id,
-    name: data.name || 'app.apk',
-    appName: data.appName || data.name || 'Android App',
-    size: data.size || buffer.length,
-    buffer,
-    type: data.type || 'application/vnd.android.package-archive',
-    uploadedAt: Number(data.uploadedAt || now),
-    expiresAt: Number(data.expiresAt || 0),
-    retention: data.retention || 'permanent',
+    id,
+    name: firestoreData?.name || cached?.name || 'app.apk',
+    appName: firestoreData?.appName || cached?.appName || firestoreData?.name || 'Android App',
+    size: firestoreData?.size || cached?.size || finalBuffer.length,
+    buffer: finalBuffer,
+    type: firestoreData?.type || 'application/vnd.android.package-archive',
+    uploadedAt: Number(firestoreData?.uploadedAt || cached?.uploadedAt || now),
+    expiresAt: Number(firestoreData?.expiresAt || cached?.expiresAt || 0),
+    retention: firestoreData?.retention || cached?.retention || 'permanent',
     isExpired: false,
-    publicUrl: data.publicUrl || '',
-    downloadUrl: data.downloadUrl || '',
-    downloadsCount: Number(data.downloadsCount || 0),
-    hasChunks: Boolean(data.hasChunks),
-    chunksCount: data.chunksCount || 0,
+    publicUrl: firestoreData?.publicUrl || cached?.publicUrl || `/app?id=${id}`,
+    downloadUrl: firestoreData?.downloadUrl || cached?.downloadUrl || `/app/download/${id}`,
+    downloadsCount: Number(firestoreData?.downloadsCount || cached?.downloadsCount || 0),
+    hasChunks: false,
+    chunksCount: 0,
   };
 
   appsMemoryCache.set(id, appItem);
   pruneAppsCache();
-  return { app: appItem, buffer };
+  return { app: appItem, buffer: finalBuffer };
 }
 
-// 1. Upload APK App file and store in Cloud Firestore (RAM cache + auto-chunking for any size)
+// 1. Upload APK App file (Zero timeout, disk streaming + RAM cache + single Firestore metadata write)
 app.post('/api/apps/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -1180,8 +1230,12 @@ app.post('/api/apps/upload', upload.single('file'), async (req, res) => {
     const publicUrl = `${protocol}://${host}/app?id=${id}`;
     const downloadUrl = `${protocol}://${host}/app/download/${id}`;
 
-    // Store in RAM cache immediately for zero-lag downloading
-    appsMemoryCache.set(id, {
+    // 1. Instantly save binary APK to disk (Takes ~5ms, zero Firestore write units, reliable streaming)
+    const diskPath = path.join(APPS_DIR, `${id}.apk`);
+    await fsp.writeFile(diskPath, req.file.buffer);
+
+    // 2. Store in RAM cache for instantaneous downloading
+    const cachedApp: CachedApp = {
       id,
       name: originalName,
       appName: cleanAppName,
@@ -1195,14 +1249,11 @@ app.post('/api/apps/upload', upload.single('file'), async (req, res) => {
       publicUrl,
       downloadUrl,
       downloadsCount: 0,
-    });
+    };
+    appsMemoryCache.set(id, cachedApp);
     pruneAppsCache();
 
-    const base64Data = req.file.buffer.toString('base64');
-    const CHUNK_SIZE = 400000;
-    const needsChunking = base64Data.length > 600000;
-    const chunksCount = needsChunking ? Math.ceil(base64Data.length / CHUNK_SIZE) : 0;
-
+    // 3. Single lightweight metadata document for Cloud Firestore (Takes 1 write unit instead of 88 writes!)
     const newApp: Record<string, any> = {
       id,
       name: originalName,
@@ -1211,32 +1262,27 @@ app.post('/api/apps/upload', upload.single('file'), async (req, res) => {
       type: 'application/vnd.android.package-archive',
       publicUrl,
       downloadUrl,
+      storagePath: `uploads/apps/${id}.apk`,
+      storageProvider: 'local-disk',
       uploadedAt: now,
       expiresAt: expiresAt || 0,
       retention,
       isExpired: false,
       downloadsCount: 0,
-      hasChunks: needsChunking,
-      chunksCount,
-      dataUrl: needsChunking ? '' : `data:application/vnd.android.package-archive;base64,${base64Data}`,
+      hasChunks: false,
+      chunksCount: 0,
     };
 
-    if (needsChunking) {
-      const chunkWrites = [];
-      for (let i = 0; i < chunksCount; i++) {
-        const chunkData = base64Data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        chunkWrites.push(
-          setDoc(doc(fbDb, 'apps', id, 'chunks', `chunk_${i}`), {
-            chunkIndex: i,
-            data: chunkData,
-          })
-        );
-      }
-      await Promise.all(chunkWrites);
+    // Save to Firestore with a 6-second timeout so network/quota issues never hang the browser
+    try {
+      await Promise.race([
+        setDoc(doc(fbDb, 'apps', id), newApp),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timeout')), 6000))
+      ]);
+      console.log(`[Firebase Firestore] APK App created: ${id} ("${cleanAppName}", Size: ${(req.file.size / (1024 * 1024)).toFixed(2)} MB)`);
+    } catch (fbErr: any) {
+      console.warn(`[Firebase] App metadata Firestore sync warning (saved locally & in RAM):`, fbErr?.message);
     }
-
-    await setDoc(doc(fbDb, 'apps', id), newApp);
-    console.log(`[Firebase Firestore] APK App created: ${id} ("${cleanAppName}", Size: ${(req.file.size / (1024 * 1024)).toFixed(2)} MB)`);
 
     return res.json({ success: true, app: newApp });
   } catch (err: any) {
@@ -1245,43 +1291,73 @@ app.post('/api/apps/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// 2. Get All Uploaded APK Apps from Cloud Firestore
+// 2. Get All Uploaded APK Apps (Merged from Firestore and RAM cache)
 app.get('/api/apps', async (_req, res) => {
   try {
-    const snapshot = await getDocs(collection(fbDb, 'apps'));
     const now = Date.now();
-    const appsList: any[] = [];
+    const appsMap = new Map<string, any>();
 
-    for (const d of snapshot.docs) {
-      const data = d.data();
-      const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
-      if (expiresAt && now > expiresAt) {
-        deleteDoc(doc(fbDb, 'apps', d.id)).catch(() => {});
-        continue;
+    // Load from Firestore
+    try {
+      const snapshot = await getDocs(collection(fbDb, 'apps'));
+      for (const d of snapshot.docs) {
+        const data = d.data();
+        const expiresAt = data.expiresAt && data.expiresAt > 0 ? Number(data.expiresAt) : null;
+        if (expiresAt && now > expiresAt) {
+          deleteDoc(doc(fbDb, 'apps', d.id)).catch(() => {});
+          const diskPath = path.join(APPS_DIR, `${d.id}.apk`);
+          fsp.unlink(diskPath).catch(() => {});
+          continue;
+        }
+
+        appsMap.set(data.id || d.id, {
+          id: data.id || d.id,
+          name: data.name || 'app.apk',
+          appName: data.appName || data.name || 'Android App',
+          size: Number(data.size || 0),
+          type: data.type || 'application/vnd.android.package-archive',
+          uploadedAt: Number(data.uploadedAt || now),
+          expiresAt,
+          retention: data.retention || (expiresAt ? '1day' : 'permanent'),
+          isExpired: false,
+          publicUrl: data.publicUrl,
+          downloadUrl: data.downloadUrl,
+          downloadsCount: Number(data.downloadsCount || 0),
+          hasChunks: Boolean(data.hasChunks),
+          chunksCount: data.chunksCount || 0,
+        });
       }
-
-      appsList.push({
-        id: data.id || d.id,
-        name: data.name || 'app.apk',
-        appName: data.appName || data.name || 'Android App',
-        size: Number(data.size || 0),
-        type: data.type || 'application/vnd.android.package-archive',
-        uploadedAt: Number(data.uploadedAt || now),
-        expiresAt,
-        retention: data.retention || (expiresAt ? '1day' : 'permanent'),
-        isExpired: false,
-        publicUrl: data.publicUrl,
-        downloadUrl: data.downloadUrl,
-        downloadsCount: Number(data.downloadsCount || 0),
-        hasChunks: Boolean(data.hasChunks),
-        chunksCount: data.chunksCount || 0,
-      });
+    } catch (fbErr: any) {
+      console.warn('[Firestore] Error fetching apps collection:', fbErr?.message);
     }
 
-    appsList.sort((a, b) => b.uploadedAt - a.uploadedAt);
+    // Also include any apps from memory cache that might not have reached Firestore
+    for (const [id, cached] of appsMemoryCache.entries()) {
+      if (cached.expiresAt > 0 && now > cached.expiresAt) continue;
+      if (!appsMap.has(id)) {
+        appsMap.set(id, {
+          id: cached.id,
+          name: cached.name,
+          appName: cached.appName,
+          size: cached.size,
+          type: cached.type,
+          uploadedAt: cached.uploadedAt,
+          expiresAt: cached.expiresAt || null,
+          retention: cached.retention,
+          isExpired: false,
+          publicUrl: cached.publicUrl,
+          downloadUrl: cached.downloadUrl,
+          downloadsCount: cached.downloadsCount || 0,
+          hasChunks: false,
+          chunksCount: 0,
+        });
+      }
+    }
+
+    const appsList = Array.from(appsMap.values()).sort((a, b) => b.uploadedAt - a.uploadedAt);
     return res.json(appsList);
   } catch (err: any) {
-    console.error('Error fetching apps from Firestore:', err);
+    console.error('Error fetching apps:', err);
     return res.json([]);
   }
 });
@@ -1290,12 +1366,23 @@ app.get('/api/apps', async (_req, res) => {
 app.get('/api/apps/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const now = Date.now();
+
+    // Check memory cache
+    const cached = appsMemoryCache.get(id);
+    if (cached) {
+      if (cached.expiresAt > 0 && now > cached.expiresAt) {
+        appsMemoryCache.delete(id);
+        return res.status(404).json({ error: 'App expired' });
+      }
+      return res.json({ success: true, app: cached });
+    }
+
     const docSnap = await getDoc(doc(fbDb, 'apps', id));
     if (!docSnap.exists()) {
       return res.status(404).json({ error: 'App not found' });
     }
     const data = docSnap.data();
-    const now = Date.now();
     if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
       deleteDoc(doc(fbDb, 'apps', id)).catch(() => {});
       return res.status(404).json({ error: 'App expired' });
@@ -1306,19 +1393,19 @@ app.get('/api/apps/:id', async (req, res) => {
   }
 });
 
-// 4. Delete an APK App from Cloud Firestore (and subcollection chunks)
+// 4. Delete an APK App from disk, Cloud Firestore, and memory
 app.delete('/api/apps/:id', async (req, res) => {
   try {
     const { id } = req.params;
     appsMemoryCache.delete(id);
 
-    try {
-      const chunksSnap = await getDocs(collection(fbDb, 'apps', id, 'chunks'));
-      const chunkDeletes = chunksSnap.docs.map(c => deleteDoc(doc(fbDb, 'apps', id, 'chunks', c.id)));
-      await Promise.all(chunkDeletes);
-    } catch {}
+    // Delete from disk immediately
+    const diskPath = path.join(APPS_DIR, `${id}.apk`);
+    fsp.unlink(diskPath).catch(() => {});
 
-    await deleteDoc(doc(fbDb, 'apps', id));
+    // Delete Firestore record with safe timeout so client never waits
+    withTimeout(deleteDoc(doc(fbDb, 'apps', id)), 2500, null).catch(() => {});
+
     console.log(`[Firebase Firestore] Deleted APK app: ${id}`);
     return res.json({ success: true });
   } catch (err: any) {
@@ -1326,7 +1413,7 @@ app.delete('/api/apps/:id', async (req, res) => {
   }
 });
 
-// 5. Direct Binary APK Download Endpoint (Triggers instant native Android download & installation prompt)
+// 5. Direct Binary APK Download Endpoint (Instant streaming from disk / RAM with 0 timeout)
 app.all(['/app/download/:id', '/api/apps/:id/download'], async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
@@ -1337,6 +1424,37 @@ app.all(['/app/download/:id', '/api/apps/:id/download'], async (req, res) => {
 
   try {
     const { id } = req.params;
+    const diskPath = path.join(APPS_DIR, `${id}.apk`);
+
+    // A. If file exists on disk, stream directly with zero RAM overhead
+    if (fs.existsSync(diskPath)) {
+      const stat = fs.statSync(diskPath);
+      let appName = 'app.apk';
+      const cached = appsMemoryCache.get(id);
+      if (cached?.name) {
+        appName = cached.name;
+      }
+
+      const downloadFileName = appName.endsWith('.apk') ? appName : `${appName}.apk`;
+
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadFileName)}"`);
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+
+      if (req.method === 'HEAD') {
+        return res.end();
+      }
+
+      // Track download count asynchronously
+      if (cached) cached.downloadsCount = (cached.downloadsCount || 0) + 1;
+      setDoc(doc(fbDb, 'apps', id), { downloadsCount: (cached?.downloadsCount || 1) }, { merge: true }).catch(() => {});
+
+      const stream = fs.createReadStream(diskPath);
+      return stream.pipe(res);
+    }
+
+    // B. Fallback to full buffer loader (RAM / Firestore)
     const appData = await loadFullAppBuffer(id);
     if (!appData) {
       return res.status(404).send('APK file not found or expired');

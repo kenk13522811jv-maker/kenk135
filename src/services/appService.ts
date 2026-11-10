@@ -28,7 +28,24 @@ export async function uploadApp(
 
     xhr.onload = () => {
       try {
-        const data = JSON.parse(xhr.responseText);
+        const text = (xhr.responseText || '').trim();
+        if (!text) {
+          reject(new Error(`সার্ভার থেকে খালি রেসপন্স এসেছে (HTTP ${xhr.status || 500})`));
+          return;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          if (xhr.status >= 400) {
+            reject(new Error(`সার্ভার ত্রুটি (HTTP ${xhr.status}): রিকোয়েস্ট ব্যর্থ হয়েছে`));
+          } else {
+            reject(new Error(`রেসপন্স সঠিক JSON ফরম্যাটে নেই (HTTP ${xhr.status})`));
+          }
+          return;
+        }
+
         if (xhr.status >= 200 && xhr.status < 300 && data.success && data.app) {
           resolve(data.app);
         } else {
@@ -40,7 +57,11 @@ export async function uploadApp(
     };
 
     xhr.onerror = () => {
-      reject(new Error('Network error during app upload'));
+      reject(new Error('নেটওয়ার্ক সংযোগ বিঘ্নিত হয়েছে। সার্ভারে রিকোয়েস্ট পৌঁছাতে পারেনি।'));
+    };
+
+    xhr.ontimeout = () => {
+      reject(new Error('আপলোড সম্পন্ন হতে অতিরিক্ত সময় লেগেছে (টাইমআউট)।'));
     };
 
     xhr.send(formData);
